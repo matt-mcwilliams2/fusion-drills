@@ -22,6 +22,49 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '../client/build')));
 
 // ============================================================
+// LEVELS SYSTEM
+// ============================================================
+
+const LEVELS = [
+  { name: 'Neymar',    threshold: 0,    color: '#FFD700', textColor: '#000000' },
+  { name: 'Mbappe',    threshold: 89,   color: '#1348e5', textColor: '#000000' },
+  { name: 'Salah',     threshold: 230,  color: '#C8102E', textColor: '#000000' },
+  { name: 'Yamal',     threshold: 435,  color: '#CD7F32', textColor: '#000000' },
+  { name: 'Guardiola', threshold: 682,  color: '#000000', textColor: '#ffffff' },
+  { name: 'Haaland',   threshold: 901,  color: '#6CABDD', textColor: '#000000' },
+  { name: 'Maradona',  threshold: 1233, color: '#CD7F32', textColor: '#000000' },
+  { name: 'Cruyff',    threshold: 1677, color: '#f77c00', textColor: '#000000' },
+  { name: 'Xavi',      threshold: 2098, color: '#ffffff', textColor: '#C8102E' },
+  { name: 'Zico',      threshold: 2455, color: '#C0C0C0', textColor: '#000000' },
+  { name: 'Pele',      threshold: 2833, color: '#009739', textColor: '#FFD700' },
+  { name: 'Messi',     threshold: 3209, color: '#FF69B4', textColor: '#000000' },
+  { name: 'Ronaldo',   threshold: 3651, color: '#FFD700', textColor: '#000000' },
+];
+
+function getLevelInfo(points) {
+  let current = LEVELS[0];
+  for (let i = LEVELS.length - 1; i >= 0; i--) {
+    if (points >= LEVELS[i].threshold) {
+      current = LEVELS[i];
+      const next = i < LEVELS.length - 1 ? LEVELS[i + 1] : null;
+      return {
+        name: current.name,
+        color: current.color,
+        textColor: current.textColor,
+        nextLevelName: next ? next.name : null,
+      };
+      break;
+    }
+  }
+  return {
+    name: current.name,
+    color: current.color,
+    textColor: current.textColor,
+    nextLevelName: LEVELS[1] ? LEVELS[1].name : null,
+  };
+}
+
+// ============================================================
 // AUTH MIDDLEWARE
 // ============================================================
 
@@ -212,10 +255,62 @@ async function calculatePlayerPoints(userId, seasonStartDate, seasonEndDate) {
 async function checkAndAwardBadges(userId) {
   const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
   const season = seasonResult.rows[0];
-  if (!season) return;
+  if (!season) return [];
 
   const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(userId, season.start_date, season.end_date);
   const currentStreak = await calculateCurrentStreak(userId, season.start_date, season.end_date);
+  const drills = await getSeasonDrills(userId, season.start_date, season.end_date);
+
+  // Check perfect week (already calculated in calculatePlayerPoints but we need the boolean)
+  const weekMap = {};
+  for (const drill of drills) {
+    const d = drill.date instanceof Date ? drill.date : new Date(drill.date);
+    const day = d.getUTCDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() + mondayOffset);
+    const weekKey = monday.toISOString().split('T')[0];
+    if (!weekMap[weekKey]) weekMap[weekKey] = { total: 0, completed: 0 };
+    weekMap[weekKey].total++;
+    if (drill.completion_id) weekMap[weekKey].completed++;
+  }
+  const hasPerfectWeek = Object.values(weekMap).some(w => w.total > 0 && w.completed === w.total);
+
+  // Check perfect month
+  const monthMap = {};
+  for (const drill of drills) {
+    const d = drill.date instanceof Date ? drill.date : new Date(drill.date);
+    const monthKey = d.toISOString().slice(0, 7); // YYYY-MM
+    if (!monthMap[monthKey]) monthMap[monthKey] = { total: 0, completed: 0 };
+    monthMap[monthKey].total++;
+    if (drill.completion_id) monthMap[monthKey].completed++;
+  }
+  const hasPerfectMonth = Object.values(monthMap).some(m => m.total > 0 && m.completed === m.total);
+
+  // Check challenge drill completions
+  const challengeResult = await pool.query(
+    `SELECT COUNT(*) as cnt FROM completions c
+     JOIN drills d ON d.id = c.drill_id
+     WHERE c.user_id = $1 AND d.is_challenge = true
+       AND d.date BETWEEN $2 AND $3`,
+    [userId, season.start_date, season.end_date]
+  );
+  const challengeCount = parseInt(challengeResult.rows[0].cnt, 10);
+
+  // Check weekly winner: is this user currently #1 by points?
+  const playersResult = await pool.query(
+    "SELECT id FROM users WHERE role = 'player' AND active = true"
+  );
+  let isWeeklyWinner = false;
+  if (playersResult.rows.length > 0) {
+    let topPoints = 0;
+    let topId = null;
+    for (const p of playersResult.rows) {
+      const { totalPoints: pp } = await calculatePlayerPoints(p.id, season.start_date, season.end_date);
+      if (pp > topPoints) { topPoints = pp; topId = p.id; }
+    }
+    isWeeklyWinner = topId === userId && topPoints > 0;
+  }
 
   const badgeCriteria = [
     { slug: 'first-touch', condition: totalCompletions >= 1 },
@@ -224,18 +319,38 @@ async function checkAndAwardBadges(userId) {
     { slug: 'week-warrior', condition: currentStreak >= 7 },
     { slug: 'above-and-beyond', condition: extraCount >= 5 },
     { slug: 'century', condition: totalPoints >= 100 },
+    { slug: 'perfect-week', condition: hasPerfectWeek },
+    { slug: 'perfect-month', condition: hasPerfectMonth },
+    { slug: 'challenge-accepted', condition: challengeCount >= 5 },
+    { slug: 'challenge-master', condition: challengeCount >= 20 },
+    { slug: 'weekly-winner', condition: isWeeklyWinner },
+    { slug: 'extra-effort-5', condition: extraCount >= 5 },
+    { slug: 'extra-effort-20', condition: extraCount >= 20 },
+    { slug: '200-club', condition: totalPoints >= 200 },
+    { slug: '500-club', condition: totalPoints >= 500 },
+    { slug: '1000-club', condition: totalPoints >= 1000 },
+    { slug: '2000-club', condition: totalPoints >= 2000 },
+    { slug: '3000-club', condition: totalPoints >= 3000 },
+    { slug: '5000-club', condition: totalPoints >= 5000 },
+    { slug: '10000-club', condition: totalPoints >= 10000 },
   ];
 
+  const newBadges = [];
   for (const badge of badgeCriteria) {
     if (badge.condition) {
-      await pool.query(
+      const result = await pool.query(
         `INSERT INTO user_badges (user_id, badge_id)
          SELECT $1, b.id FROM badges b WHERE b.slug = $2
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT DO NOTHING
+         RETURNING badge_id`,
         [userId, badge.slug]
       );
+      if (result.rows.length > 0) {
+        newBadges.push(badge.slug);
+      }
     }
   }
+  return newBadges;
 }
 
 // ============================================================
@@ -427,6 +542,15 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
       return res.status(403).json({ error: 'You can only complete drills from today or yesterday' });
     }
 
+    // Capture level BEFORE completion for level-up detection
+    const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
+    let levelBefore = null;
+    if (seasonResult.rows.length > 0) {
+      const s = seasonResult.rows[0];
+      const { totalPoints: ptsBefore } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
+      levelBefore = getLevelInfo(ptsBefore);
+    }
+
     const result = await pool.query(
       `INSERT INTO completions (user_id, drill_id, did_extra)
        VALUES ($1, $2, $3)
@@ -445,9 +569,21 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
     }
 
     // Check and award badges after completion
-    await checkAndAwardBadges(req.user.id);
+    const newBadges = await checkAndAwardBadges(req.user.id);
 
-    res.json({ completion: result.rows[0] });
+    // Detect level-up
+    let levelUp = null;
+    let level = null;
+    if (seasonResult.rows.length > 0) {
+      const s = seasonResult.rows[0];
+      const { totalPoints: ptsAfter } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
+      level = getLevelInfo(ptsAfter);
+      if (levelBefore && level.name !== levelBefore.name) {
+        levelUp = level;
+      }
+    }
+
+    res.json({ completion: result.rows[0], newBadges, levelUp, level });
   } catch (err) {
     console.error('Complete drill error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -476,7 +612,7 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
        WHERE role = 'player' AND active = true`
     );
 
-    // Calculate points, completions, and streak for each player
+    // Calculate points, completions, streak, and level for each player
     const players = [];
     for (const player of playersResult.rows) {
       const { totalPoints, totalCompletions } = await calculatePlayerPoints(player.id, season.start_date, season.end_date);
@@ -489,6 +625,7 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
         completions: totalCompletions,
         points: totalPoints,
         current_streak,
+        level: getLevelInfo(totalPoints),
       });
     }
 
@@ -518,6 +655,7 @@ app.get('/api/me/stats', authenticate, async (req, res) => {
         total_completions: 0,
         total_points: 0,
         extra_count: 0,
+        level: getLevelInfo(0),
       });
     }
 
@@ -533,6 +671,7 @@ app.get('/api/me/stats', authenticate, async (req, res) => {
       total_completions: totalCompletions,
       total_points: totalPoints,
       extra_count: extraCount,
+      level: getLevelInfo(totalPoints),
     });
   } catch (err) {
     console.error('User stats error:', err);
@@ -966,6 +1105,32 @@ async function runMigrations() {
       await pool.query('ALTER TABLE drills ADD COLUMN is_challenge BOOLEAN DEFAULT false');
       console.log('Migration: added is_challenge column to drills.');
     }
+    // Insert new badges if they don't exist
+    const newBadges = [
+      ['perfect-week',      'Perfect Week',      'Complete every drill in a week',  '📅'],
+      ['perfect-month',     'Perfect Month',     'Complete every drill in a month', '🗓️'],
+      ['challenge-accepted','Challenge Accepted', 'Complete 5 challenge drills',    '💪'],
+      ['challenge-master',  'Challenge Master',  'Complete 20 challenge drills',    '🏆'],
+      ['weekly-winner',     'Weekly Winner',     'Finish #1 on the leaderboard',   '👑'],
+      ['extra-effort-5',    'Extra Effort x5',   'Log extra time 5 times',         '⏱️'],
+      ['extra-effort-20',   'Extra Effort x20',  'Log extra time 20 times',        '🌟'],
+      ['200-club',          '200 Club',          'Earn 200 points',                '🥉'],
+      ['500-club',          '500 Club',          'Earn 500 points',                '🥈'],
+      ['1000-club',         '1000 Club',         'Earn 1000 points',               '🥇'],
+      ['2000-club',         '2000 Club',         'Earn 2000 points',               '💎'],
+      ['3000-club',         '3000 Club',         'Earn 3000 points',               '💍'],
+      ['5000-club',         '5000 Club',         'Earn 5000 points',               '🏅'],
+      ['10000-club',        '10000 Club',        'Earn 10000 points',              '🌠'],
+    ];
+    for (const [slug, name, description, emoji] of newBadges) {
+      await pool.query(
+        `INSERT INTO badges (slug, name, description, icon_emoji)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (slug) DO NOTHING`,
+        [slug, name, description, emoji]
+      );
+    }
+    console.log('Migration: ensured all badges exist.');
   } catch (err) {
     console.error('Migration error:', err);
   }

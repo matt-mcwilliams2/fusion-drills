@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import LevelShield from '../components/LevelShield';
 
 export default function Me() {
   const { apiFetch, user } = useAuth();
@@ -24,11 +25,26 @@ export default function Me() {
     return <div className="page"><div className="loading"><div className="spinner" /></div></div>;
   }
 
+  const level = stats?.level;
+
   return (
     <div className="page">
       <h1 className="page-title">
         {user.first_name} {user.last_name}
       </h1>
+
+      {level && (
+        <div className="level-section">
+          <LevelShield name={level.name} color={level.color} textColor={level.textColor} size="large" />
+          <div className="level-info">
+            <div className="level-label">Level</div>
+            <div className="level-name">{level.name}</div>
+            {level.nextLevelName && (
+              <div className="level-next">Next: {level.nextLevelName}</div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="stats-grid">
         <div className="stat-card">

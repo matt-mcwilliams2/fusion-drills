@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import LevelShield from '../components/LevelShield';
 
 export default function Leaderboard() {
   const { apiFetch, user } = useAuth();
@@ -44,9 +45,12 @@ export default function Leaderboard() {
               {p.first_name[0]}{p.last_name[0]}
             </div>
             <div className="lb-info">
-              <div className="lb-name">{p.first_name} {p.last_name}</div>
+              <div className="lb-name">
+                {p.level && <LevelShield name={p.level.name} color={p.level.color} textColor={p.level.textColor} size="small" />}
+                {p.first_name} {p.last_name}
+              </div>
               <div className="lb-streak">
-                {p.current_streak > 0 ? `🔥 ${p.current_streak} day streak` : 'No streak'}
+                {p.current_streak > 0 ? `\uD83D\uDD25 ${p.current_streak} day streak` : 'No streak'}
               </div>
             </div>
             <div className="lb-points">

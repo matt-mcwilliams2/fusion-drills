@@ -10,7 +10,21 @@ INSERT INTO badges (slug, name, description, icon_emoji) VALUES
     ('week-warrior',     'Week Warrior',      '7-day streak',               '🔥'),
     ('double-digits',    'Double Digits',     '10 completions total',       '🔟'),
     ('above-and-beyond', 'Above and Beyond',  'Do extra time 5 times',      '⭐'),
-    ('century',          'Century',           'Earn 100 points',            '💯');
+    ('century',          'Century',           'Earn 100 points',            '💯'),
+    ('perfect-week',     'Perfect Week',      'Complete every drill in a week', '📅'),
+    ('perfect-month',    'Perfect Month',     'Complete every drill in a month', '🗓️'),
+    ('challenge-accepted','Challenge Accepted','Complete 5 challenge drills',  '💪'),
+    ('challenge-master', 'Challenge Master',  'Complete 20 challenge drills', '🏆'),
+    ('weekly-winner',    'Weekly Winner',     'Finish #1 on the leaderboard', '👑'),
+    ('extra-effort-5',   'Extra Effort x5',   'Log extra time 5 times',      '⏱️'),
+    ('extra-effort-20',  'Extra Effort x20',  'Log extra time 20 times',     '🌟'),
+    ('200-club',         '200 Club',          'Earn 200 points',             '🥉'),
+    ('500-club',         '500 Club',          'Earn 500 points',             '🥈'),
+    ('1000-club',        '1000 Club',         'Earn 1000 points',            '🥇'),
+    ('2000-club',        '2000 Club',         'Earn 2000 points',            '💎'),
+    ('3000-club',        '3000 Club',         'Earn 3000 points',            '💍'),
+    ('5000-club',        '5000 Club',         'Earn 5000 points',            '🏅'),
+    ('10000-club',       '10000 Club',        'Earn 10000 points',           '🌠');
 
 -- ============================================================
 -- Users

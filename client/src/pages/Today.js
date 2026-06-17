@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import confetti from 'canvas-confetti';
 import { useAuth } from '../context/AuthContext';
+import LevelShield from '../components/LevelShield';
 
 function getYouTubeEmbedUrl(url) {
   if (!url) return null;
@@ -46,6 +47,7 @@ export default function Today() {
   const [loading, setLoading] = useState(true);
   const [completing, setCompleting] = useState(false);
   const [streak, setStreak] = useState(null);
+  const [celebration, setCelebration] = useState(null);
 
   const today = getLocalToday();
   const yesterday = getLocalYesterday();
@@ -104,6 +106,21 @@ export default function Today() {
 
       const stats = await apiFetch('/api/me/stats');
       setStreak(stats.current_streak);
+
+      // Show celebration overlay for level-up or new badges
+      if (data.levelUp) {
+        confetti({
+          particleCount: 300,
+          spread: 120,
+          origin: { y: 0.5 },
+          colors: ['#f77c00', '#1348e5', '#FFD700', '#22c55e', '#FF69B4'],
+        });
+        setCelebration({ type: 'levelUp', level: data.levelUp });
+        setTimeout(() => setCelebration(null), 4000);
+      } else if (data.newBadges && data.newBadges.length > 0) {
+        setCelebration({ type: 'badge', count: data.newBadges.length });
+        setTimeout(() => setCelebration(null), 4000);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -229,6 +246,33 @@ export default function Today() {
         <button className="date-nav-btn" onClick={goToNext} disabled={isToday}>{'\u203A'}</button>
       </div>
       {renderDrillContent()}
+
+      {celebration && (
+        <div className="celebration-overlay" onClick={() => setCelebration(null)}>
+          <div className="celebration-card">
+            {celebration.type === 'levelUp' ? (
+              <>
+                <LevelShield
+                  name={celebration.level.name}
+                  color={celebration.level.color}
+                  textColor={celebration.level.textColor}
+                  size="large"
+                />
+                <div className="celebration-title">Level Up!</div>
+                <div className="celebration-msg">You reached {celebration.level.name}!</div>
+              </>
+            ) : (
+              <>
+                <div className="celebration-emoji">{'\uD83C\uDFC5'}</div>
+                <div className="celebration-title">Badge Earned!</div>
+                <div className="celebration-msg">
+                  You earned {celebration.count} new badge{celebration.count > 1 ? 's' : ''}! Check your profile.
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
