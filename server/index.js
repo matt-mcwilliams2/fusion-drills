@@ -238,8 +238,11 @@ async function calculatePlayerPoints(userId, seasonStartDate, seasonEndDate) {
     }
   }
 
-  // Perfect week bonus: for each Mon-Sun calendar week that has at least
-  // one scheduled drill, if ALL drills in that week are completed, +10 pts
+  // Perfect week bonus: for each COMPLETED Mon-Sun calendar week (Sunday has
+  // passed) that has at least one scheduled drill, if ALL drills in that week
+  // are completed, +10 pts
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
   const weekMap = {};
   for (const drill of drills) {
     const d = drill.date instanceof Date ? drill.date : new Date(drill.date);
@@ -249,13 +252,17 @@ async function calculatePlayerPoints(userId, seasonStartDate, seasonEndDate) {
     monday.setUTCDate(d.getUTCDate() + mondayOffset);
     const weekKey = monday.toISOString().split('T')[0];
 
-    if (!weekMap[weekKey]) weekMap[weekKey] = { total: 0, completed: 0 };
+    if (!weekMap[weekKey]) {
+      const sunday = new Date(monday);
+      sunday.setUTCDate(monday.getUTCDate() + 6);
+      weekMap[weekKey] = { total: 0, completed: 0, sunday };
+    }
     weekMap[weekKey].total++;
     if (drill.completion_id) weekMap[weekKey].completed++;
   }
 
   for (const week of Object.values(weekMap)) {
-    if (week.total > 0 && week.completed === week.total) {
+    if (week.sunday <= today && week.total > 0 && week.completed === week.total) {
       totalPoints += 10;
     }
   }
@@ -277,7 +284,9 @@ async function checkAndAwardBadges(userId) {
   const currentStreak = await calculateCurrentStreak(userId, season.start_date, endDate);
   const drills = await getSeasonDrills(userId, season.start_date, endDate);
 
-  // Check perfect week (already calculated in calculatePlayerPoints but we need the boolean)
+  // Check perfect week: only count COMPLETED weeks (Sunday has passed)
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
   const weekMap = {};
   for (const drill of drills) {
     const d = drill.date instanceof Date ? drill.date : new Date(drill.date);
@@ -286,13 +295,19 @@ async function checkAndAwardBadges(userId) {
     const monday = new Date(d);
     monday.setUTCDate(d.getUTCDate() + mondayOffset);
     const weekKey = monday.toISOString().split('T')[0];
-    if (!weekMap[weekKey]) weekMap[weekKey] = { total: 0, completed: 0 };
+    if (!weekMap[weekKey]) {
+      const sunday = new Date(monday);
+      sunday.setUTCDate(monday.getUTCDate() + 6);
+      weekMap[weekKey] = { total: 0, completed: 0, sunday };
+    }
     weekMap[weekKey].total++;
     if (drill.completion_id) weekMap[weekKey].completed++;
   }
-  const hasPerfectWeek = Object.values(weekMap).some(w => w.total > 0 && w.completed === w.total);
+  const hasPerfectWeek = Object.values(weekMap).some(
+    w => w.sunday <= today && w.total > 0 && w.completed === w.total
+  );
 
-  // Check perfect month
+  // Check perfect month: only count months that have fully ended
   const monthMap = {};
   for (const drill of drills) {
     const d = drill.date instanceof Date ? drill.date : new Date(drill.date);
@@ -301,7 +316,11 @@ async function checkAndAwardBadges(userId) {
     monthMap[monthKey].total++;
     if (drill.completion_id) monthMap[monthKey].completed++;
   }
-  const hasPerfectMonth = Object.values(monthMap).some(m => m.total > 0 && m.completed === m.total);
+  const hasPerfectMonth = Object.entries(monthMap).some(([key, m]) => {
+    const [year, mon] = key.split('-').map(Number);
+    const lastDay = new Date(Date.UTC(year, mon, 0)); // last day of that month
+    return lastDay <= today && m.total > 0 && m.completed === m.total;
+  });
 
   // Check challenge drill completions
   const challengeResult = await pool.query(
@@ -313,19 +332,50 @@ async function checkAndAwardBadges(userId) {
   );
   const challengeCount = parseInt(challengeResult.rows[0].cnt, 10);
 
-  // Check weekly winner: is this user currently #1 by points?
-  const playersResult = await pool.query(
-    "SELECT id FROM users WHERE role = 'player' AND active = true"
-  );
+  // Check weekly winner: did this player earn the most base points in any
+  // completed Mon-Sun week? Query all drill dates to find completed weeks,
+  // then check per-week leaderboard.
   let isWeeklyWinner = false;
-  if (playersResult.rows.length > 0) {
-    let topPoints = 0;
-    let topId = null;
-    for (const p of playersResult.rows) {
-      const { totalPoints: pp } = await calculatePlayerPoints(p.id, season.start_date, endDate);
-      if (pp > topPoints) { topPoints = pp; topId = p.id; }
+  const allDrillDates = await pool.query(
+    `SELECT DISTINCT date FROM drills
+     WHERE date BETWEEN $1 AND $2 AND date <= CURRENT_DATE`,
+    [season.start_date, endDate]
+  );
+  const completedWeekMondays = new Set();
+  for (const row of allDrillDates.rows) {
+    const d = row.date instanceof Date ? row.date : new Date(row.date);
+    const day = d.getUTCDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() + mondayOffset);
+    const sunday = new Date(monday);
+    sunday.setUTCDate(monday.getUTCDate() + 6);
+    if (sunday <= today) {
+      completedWeekMondays.add(monday.toISOString().split('T')[0]);
     }
-    isWeeklyWinner = topId === userId && topPoints > 0;
+  }
+  for (const mondayStr of completedWeekMondays) {
+    const mondayDate = new Date(mondayStr + 'T00:00:00Z');
+    const sundayDate = new Date(mondayDate);
+    sundayDate.setUTCDate(mondayDate.getUTCDate() + 6);
+    const topResult = await pool.query(
+      `SELECT c.user_id,
+         SUM(COALESCE(d.points_completion, 10) +
+             CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END) as week_points
+       FROM completions c
+       JOIN drills d ON d.id = c.drill_id
+       JOIN users u ON u.id = c.user_id
+       WHERE d.date >= $1::date AND d.date <= $2::date
+         AND u.role = 'player' AND u.active = true
+       GROUP BY c.user_id
+       ORDER BY week_points DESC
+       LIMIT 1`,
+      [mondayStr, sundayDate.toISOString().split('T')[0]]
+    );
+    if (topResult.rows.length > 0 && topResult.rows[0].user_id == userId) {
+      isWeeklyWinner = true;
+      break;
+    }
   }
 
   const badgeCriteria = [
@@ -340,7 +390,6 @@ async function checkAndAwardBadges(userId) {
     { slug: 'challenge-accepted', condition: challengeCount >= 5 },
     { slug: 'challenge-master', condition: challengeCount >= 20 },
     { slug: 'weekly-winner', condition: isWeeklyWinner },
-    { slug: 'extra-effort-5', condition: extraCount >= 5 },
     { slug: 'extra-effort-20', condition: extraCount >= 20 },
     { slug: '200-club', condition: totalPoints >= 200 },
     { slug: '500-club', condition: totalPoints >= 500 },
@@ -1139,8 +1188,7 @@ async function runMigrations() {
       ['perfect-month',     'Perfect Month',     'Complete every drill in a month', '🗓️'],
       ['challenge-accepted','Challenge Accepted', 'Complete 5 challenge drills',    '💪'],
       ['challenge-master',  'Challenge Master',  'Complete 20 challenge drills',    '🏆'],
-      ['weekly-winner',     'Weekly Winner',     'Finish #1 on the leaderboard',   '👑'],
-      ['extra-effort-5',    'Extra Effort x5',   'Log extra time 5 times',         '⏱️'],
+      ['weekly-winner',     'Weekly Winner',     'Most points in a completed week', '👑'],
       ['extra-effort-20',   'Extra Effort x20',  'Log extra time 20 times',        '🌟'],
       ['200-club',          '200 Club',          'Earn 200 points',                '🥉'],
       ['500-club',          '500 Club',          'Earn 500 points',                '🥈'],
@@ -1159,6 +1207,11 @@ async function runMigrations() {
       );
     }
     console.log('Migration: ensured all badges exist.');
+    // Remove deprecated extra-effort-5 badge (duplicate of above-and-beyond)
+    await pool.query(`DELETE FROM user_badges WHERE badge_id IN (SELECT id FROM badges WHERE slug = 'extra-effort-5')`);
+    await pool.query(`DELETE FROM badges WHERE slug = 'extra-effort-5'`);
+    // Update weekly-winner description if stale
+    await pool.query(`UPDATE badges SET description = 'Most points in a completed week' WHERE slug = 'weekly-winner'`);
   } catch (err) {
     console.error('Migration error:', err);
   }
