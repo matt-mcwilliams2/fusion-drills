@@ -28,7 +28,7 @@ export default function Drills() {
 
   const openEdit = (drill) => {
     setEditing(drill);
-    setForm({ date: drill.date, title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '' });
+    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '' });
     setShowModal(true);
   };
 
@@ -55,8 +55,10 @@ export default function Drills() {
     } catch (err) { alert(err.message); }
   };
 
+  const toDateOnly = (dateStr) => (dateStr || '').split('T')[0];
+
   const formatDate = (dateStr) => {
-    const d = new Date(dateStr + 'T00:00:00');
+    const d = new Date(toDateOnly(dateStr) + 'T00:00:00');
     return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
   };
 

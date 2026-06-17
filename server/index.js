@@ -286,11 +286,80 @@ app.get('/api/drills/today', authenticate, async (req, res) => {
   }
 });
 
+// GET /api/drills/date/:date
+app.get('/api/drills/date/:date', authenticate, async (req, res) => {
+  try {
+    const { date } = req.params;
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
+    }
+
+    const result = await pool.query(
+      `SELECT d.*,
+              c.id as completion_id,
+              c.completed_at,
+              c.did_extra
+       FROM drills d
+       LEFT JOIN completions c ON c.drill_id = d.id AND c.user_id = $1
+       WHERE d.date = $2::date`,
+      [req.user.id, date]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ drill: null, completion: null });
+    }
+
+    const row = result.rows[0];
+    const drill = {
+      id: row.id,
+      date: row.date,
+      title: row.title,
+      description: row.description,
+      youtube_url: row.youtube_url,
+      created_by: row.created_by,
+      created_at: row.created_at,
+    };
+
+    const completion = row.completion_id
+      ? {
+          id: row.completion_id,
+          completed_at: row.completed_at,
+          did_extra: row.did_extra,
+        }
+      : null;
+
+    res.json({ drill, completion });
+  } catch (err) {
+    console.error('Get drill by date error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // POST /api/drills/:id/complete
 app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
   try {
     const drillId = parseInt(req.params.id, 10);
     const { did_extra } = req.body;
+
+    // Verify drill exists and is for today or yesterday
+    const drillCheck = await pool.query(
+      `SELECT date FROM drills WHERE id = $1`,
+      [drillId]
+    );
+    if (drillCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Drill not found' });
+    }
+    const drillDate = drillCheck.rows[0].date.toISOString().split('T')[0];
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+    if (drillDate !== todayStr && drillDate !== yesterdayStr) {
+      return res.status(403).json({ error: 'You can only complete drills from today or yesterday' });
+    }
 
     const result = await pool.query(
       `INSERT INTO completions (user_id, drill_id, did_extra)

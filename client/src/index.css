@@ -383,6 +383,71 @@ body {
   margin-top: 4px;
 }
 
+/* Date Navigation */
+.date-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.date-nav-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  color: var(--white);
+  font-size: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.2s, opacity 0.2s;
+  line-height: 1;
+  padding: 0;
+}
+
+.date-nav-btn:hover:not(:disabled) {
+  border-color: var(--orange);
+}
+
+.date-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.date-nav-label {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--orange);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  min-width: 100px;
+  text-align: center;
+}
+
+.date-nav-label:hover {
+  text-decoration: underline;
+}
+
+/* View Only Message */
+.view-only-msg {
+  text-align: center;
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+}
+
 /* Rest Day */
 .rest-day {
   text-align: center;

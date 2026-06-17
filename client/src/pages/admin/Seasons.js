@@ -47,7 +47,7 @@ export default function Seasons() {
   };
 
   const formatDate = (dateStr) => {
-    const d = new Date(dateStr + 'T00:00:00');
+    const d = new Date((dateStr || '').split('T')[0] + 'T00:00:00');
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
