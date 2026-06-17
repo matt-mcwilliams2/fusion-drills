@@ -9,15 +9,14 @@ export default function Me() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
+    Promise.allSettled([
       apiFetch('/api/me/stats'),
       apiFetch('/api/me/badges'),
     ])
-      .then(([statsData, badgesData]) => {
-        setStats(statsData);
-        setBadges(badgesData.badges || []);
+      .then(([statsResult, badgesResult]) => {
+        if (statsResult.status === 'fulfilled') setStats(statsResult.value);
+        if (badgesResult.status === 'fulfilled') setBadges(badgesResult.value.badges || []);
       })
-      .catch(console.error)
       .finally(() => setLoading(false));
   }, [apiFetch]);
 

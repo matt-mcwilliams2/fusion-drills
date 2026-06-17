@@ -53,7 +53,6 @@ function getLevelInfo(points) {
         textColor: current.textColor,
         nextLevelName: next ? next.name : null,
       };
-      break;
     }
   }
   return {
@@ -543,14 +542,19 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
     }
 
     // Capture level BEFORE completion for level-up detection
-    const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
     let levelBefore = null;
-    if (seasonResult.rows.length > 0) {
-      const s = seasonResult.rows[0];
-      const { totalPoints: ptsBefore } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
-      levelBefore = getLevelInfo(ptsBefore);
+    try {
+      const seasonCheck = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
+      if (seasonCheck.rows.length > 0) {
+        const s = seasonCheck.rows[0];
+        const { totalPoints: ptsBefore } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
+        levelBefore = getLevelInfo(ptsBefore);
+      }
+    } catch (levelErr) {
+      console.error('Level-before calculation error (non-fatal):', levelErr);
     }
 
+    // INSERT completion FIRST — this is the critical operation
     const result = await pool.query(
       `INSERT INTO completions (user_id, drill_id, did_extra)
        VALUES ($1, $2, $3)
@@ -568,19 +572,24 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
       return res.json({ completion: existing.rows[0] });
     }
 
-    // Check and award badges after completion
-    const newBadges = await checkAndAwardBadges(req.user.id);
-
-    // Detect level-up
+    // Check and award badges + detect level-up (non-critical)
+    let newBadges = [];
     let levelUp = null;
     let level = null;
-    if (seasonResult.rows.length > 0) {
-      const s = seasonResult.rows[0];
-      const { totalPoints: ptsAfter } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
-      level = getLevelInfo(ptsAfter);
-      if (levelBefore && level.name !== levelBefore.name) {
-        levelUp = level;
+    try {
+      newBadges = await checkAndAwardBadges(req.user.id);
+
+      const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
+      if (seasonResult.rows.length > 0) {
+        const s = seasonResult.rows[0];
+        const { totalPoints: ptsAfter } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
+        level = getLevelInfo(ptsAfter);
+        if (levelBefore && level.name !== levelBefore.name) {
+          levelUp = level;
+        }
       }
+    } catch (gamErr) {
+      console.error('Gamification error (non-fatal):', gamErr);
     }
 
     res.json({ completion: result.rows[0], newBadges, levelUp, level });
