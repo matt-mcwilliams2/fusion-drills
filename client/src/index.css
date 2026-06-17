@@ -290,6 +290,34 @@ body {
   margin-bottom: 16px;
 }
 
+/* Challenge Day Badge */
+.challenge-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: var(--blue);
+  color: var(--white);
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.challenge-badge-sm {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  background: var(--blue);
+  color: var(--white);
+  font-size: 0.6rem;
+  font-weight: 700;
+  border-radius: 8px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
 .card-target-time {
   font-size: 1rem;
   font-weight: 700;
@@ -718,6 +746,23 @@ body {
 
 .form-group-half {
   flex: 1;
+}
+
+.form-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.form-checkbox input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--orange);
+  cursor: pointer;
 }
 
 /* Player List in Admin */

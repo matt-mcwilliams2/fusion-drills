@@ -52,6 +52,24 @@ function requireCoach(req, res, next) {
 // ============================================================
 
 /**
+ * Get all drills for a user within a season with completion info.
+ * Shared query used by streak and points calculations.
+ */
+async function getSeasonDrills(userId, seasonStartDate, seasonEndDate) {
+  const result = await pool.query(
+    `SELECT d.id, d.date, d.points_completion, d.points_extra,
+            c.id as completion_id, c.did_extra
+     FROM drills d
+     LEFT JOIN completions c ON c.drill_id = d.id AND c.user_id = $1
+     WHERE d.date BETWEEN $2 AND $3
+       AND d.date <= CURRENT_DATE
+     ORDER BY d.date ASC`,
+    [userId, seasonStartDate, seasonEndDate]
+  );
+  return result.rows;
+}
+
+/**
  * Calculate the current streak for a user within a season.
  * A streak counts consecutive completed drills going backwards from today.
  * If today has a drill that isn't completed yet, start from yesterday.
@@ -60,7 +78,6 @@ function requireCoach(req, res, next) {
 async function calculateCurrentStreak(userId, seasonStartDate, seasonEndDate) {
   const today = new Date().toISOString().split('T')[0];
 
-  // Get all drills within the season, ordered by date DESC
   const drillsResult = await pool.query(
     `SELECT d.id, d.date,
             EXISTS(SELECT 1 FROM completions c WHERE c.user_id = $1 AND c.drill_id = d.id) as completed
@@ -78,7 +95,7 @@ async function calculateCurrentStreak(userId, seasonStartDate, seasonEndDate) {
   let startIndex = 0;
 
   // If the most recent drill is today and it's NOT completed, skip it
-  if (drills.length > 0 && drills[0].date.toISOString().split('T')[0] === today && !drills[0].completed) {
+  if (drills[0].date.toISOString().split('T')[0] === today && !drills[0].completed) {
     startIndex = 1;
   }
 
@@ -125,36 +142,81 @@ async function calculateLongestStreak(userId, seasonStartDate, seasonEndDate) {
 }
 
 // ============================================================
+// POINTS CALCULATION
+// ============================================================
+
+/**
+ * Calculate total points for a player within a season.
+ * Includes:
+ *   - Per-drill points (coach-set points_completion + points_extra)
+ *   - Streak multiplier: 1.2x after 3+ consecutive completed drills
+ *   - Perfect week bonus: +10 for each Mon-Sun week where all scheduled drills are completed
+ * Days without a scheduled drill do NOT break streaks.
+ */
+async function calculatePlayerPoints(userId, seasonStartDate, seasonEndDate) {
+  const drills = await getSeasonDrills(userId, seasonStartDate, seasonEndDate);
+
+  let totalPoints = 0;
+  let totalCompletions = 0;
+  let extraCount = 0;
+  let streak = 0;
+
+  for (const drill of drills) {
+    if (drill.completion_id) {
+      let base = (drill.points_completion != null ? drill.points_completion : 10)
+               + (drill.did_extra ? (drill.points_extra != null ? drill.points_extra : 5) : 0);
+
+      // Streak multiplier: 1.2x when completing after 3+ consecutive drills
+      if (streak >= 3) {
+        base = Math.round(base * 1.2);
+      }
+
+      totalPoints += base;
+      totalCompletions++;
+      if (drill.did_extra) extraCount++;
+      streak++;
+    } else {
+      streak = 0;
+    }
+  }
+
+  // Perfect week bonus: for each Mon-Sun calendar week that has at least
+  // one scheduled drill, if ALL drills in that week are completed, +10 pts
+  const weekMap = {};
+  for (const drill of drills) {
+    const d = drill.date instanceof Date ? drill.date : new Date(drill.date);
+    const day = d.getUTCDay(); // 0=Sun, 1=Mon ...
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() + mondayOffset);
+    const weekKey = monday.toISOString().split('T')[0];
+
+    if (!weekMap[weekKey]) weekMap[weekKey] = { total: 0, completed: 0 };
+    weekMap[weekKey].total++;
+    if (drill.completion_id) weekMap[weekKey].completed++;
+  }
+
+  for (const week of Object.values(weekMap)) {
+    if (week.total > 0 && week.completed === week.total) {
+      totalPoints += 10;
+    }
+  }
+
+  return { totalPoints, totalCompletions, extraCount };
+}
+
+// ============================================================
 // BADGE CHECKING HELPER
 // ============================================================
 
 async function checkAndAwardBadges(userId) {
-  // Get the active season
   const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
   const season = seasonResult.rows[0];
   if (!season) return;
 
-  // Gather user stats
-  const statsResult = await pool.query(
-    `SELECT
-       COUNT(c.id) as total_completions,
-       COALESCE(SUM(COALESCE(d.points_completion, 10) + CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END), 0) as total_points,
-       COUNT(CASE WHEN c.did_extra THEN 1 END) as extra_count
-     FROM completions c
-     JOIN drills d ON d.id = c.drill_id
-     WHERE c.user_id = $1
-       AND d.date BETWEEN $2 AND $3`,
-    [userId, season.start_date, season.end_date]
-  );
-
-  const stats = statsResult.rows[0];
-  const totalCompletions = parseInt(stats.total_completions, 10);
-  const totalPoints = parseInt(stats.total_points, 10);
-  const extraCount = parseInt(stats.extra_count, 10);
-
+  const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(userId, season.start_date, season.end_date);
   const currentStreak = await calculateCurrentStreak(userId, season.start_date, season.end_date);
 
-  // Define badge criteria
   const badgeCriteria = [
     { slug: 'first-touch', condition: totalCompletions >= 1 },
     { slug: 'hat-trick', condition: totalCompletions >= 3 },
@@ -268,6 +330,7 @@ app.get('/api/drills/today', authenticate, async (req, res) => {
       description: row.description,
       youtube_url: row.youtube_url,
       target_time: row.target_time,
+      is_challenge: row.is_challenge,
       created_by: row.created_by,
       created_at: row.created_at,
     };
@@ -319,6 +382,7 @@ app.get('/api/drills/date/:date', authenticate, async (req, res) => {
       description: row.description,
       youtube_url: row.youtube_url,
       target_time: row.target_time,
+      is_challenge: row.is_challenge,
       created_by: row.created_by,
       created_at: row.created_at,
     };
@@ -405,34 +469,31 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
 
     const season = seasonResult.rows[0];
 
-    // Get all active players with their points and completions within the season
+    // Get all active players
     const playersResult = await pool.query(
-      `SELECT u.id, u.first_name, u.last_name, u.avatar_color,
-              COUNT(c.id) as completions,
-              COALESCE(SUM(CASE WHEN c.id IS NOT NULL THEN COALESCE(d.points_completion, 10) + CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END ELSE 0 END), 0) as points
-       FROM users u
-       LEFT JOIN drills d ON d.date BETWEEN $1 AND $2
-       LEFT JOIN completions c ON c.user_id = u.id AND c.drill_id = d.id
-       WHERE u.role = 'player' AND u.active = true
-       GROUP BY u.id, u.first_name, u.last_name, u.avatar_color
-       ORDER BY points DESC, completions DESC`,
-      [season.start_date, season.end_date]
+      `SELECT id, first_name, last_name, avatar_color
+       FROM users
+       WHERE role = 'player' AND active = true`
     );
 
-    // Calculate current streak for each player
+    // Calculate points, completions, and streak for each player
     const players = [];
     for (const player of playersResult.rows) {
+      const { totalPoints, totalCompletions } = await calculatePlayerPoints(player.id, season.start_date, season.end_date);
       const current_streak = await calculateCurrentStreak(player.id, season.start_date, season.end_date);
       players.push({
         id: player.id,
         first_name: player.first_name,
         last_name: player.last_name,
         avatar_color: player.avatar_color,
-        completions: parseInt(player.completions, 10),
-        points: parseInt(player.points, 10),
+        completions: totalCompletions,
+        points: totalPoints,
         current_streak,
       });
     }
+
+    // Sort by points DESC, then completions DESC
+    players.sort((a, b) => b.points - a.points || b.completions - a.completions);
 
     res.json({ season, players });
   } catch (err) {
@@ -462,29 +523,16 @@ app.get('/api/me/stats', authenticate, async (req, res) => {
 
     const season = seasonResult.rows[0];
 
-    // Get aggregate stats
-    const statsResult = await pool.query(
-      `SELECT
-         COUNT(c.id) as total_completions,
-         COALESCE(SUM(COALESCE(d.points_completion, 10) + CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END), 0) as total_points,
-         COUNT(CASE WHEN c.did_extra THEN 1 END) as extra_count
-       FROM completions c
-       JOIN drills d ON d.id = c.drill_id
-       WHERE c.user_id = $1
-         AND d.date BETWEEN $2 AND $3`,
-      [req.user.id, season.start_date, season.end_date]
-    );
-
-    const stats = statsResult.rows[0];
+    const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(req.user.id, season.start_date, season.end_date);
     const currentStreak = await calculateCurrentStreak(req.user.id, season.start_date, season.end_date);
     const longestStreak = await calculateLongestStreak(req.user.id, season.start_date, season.end_date);
 
     res.json({
       current_streak: currentStreak,
       longest_streak: longestStreak,
-      total_completions: parseInt(stats.total_completions, 10),
-      total_points: parseInt(stats.total_points, 10),
-      extra_count: parseInt(stats.extra_count, 10),
+      total_completions: totalCompletions,
+      total_points: totalPoints,
+      extra_count: extraCount,
     });
   } catch (err) {
     console.error('User stats error:', err);
@@ -667,16 +715,16 @@ app.get('/api/admin/drills', authenticate, requireCoach, async (req, res) => {
 // POST /api/admin/drills
 app.post('/api/admin/drills', authenticate, requireCoach, async (req, res) => {
   try {
-    const { date, title, description, youtube_url, target_time, points_completion, points_extra } = req.body;
+    const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge } = req.body;
     if (!date || !title) {
       return res.status(400).json({ error: 'Date and title are required' });
     }
 
     const result = await pool.query(
-      `INSERT INTO drills (date, title, description, youtube_url, target_time, points_completion, points_extra, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO drills (date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [date, title, description || null, youtube_url || null, target_time ? parseInt(target_time, 10) : null, points_completion ? parseInt(points_completion, 10) : 10, points_extra ? parseInt(points_extra, 10) : 5, req.user.id]
+      [date, title, description || null, youtube_url || null, target_time ? parseInt(target_time, 10) : null, points_completion ? parseInt(points_completion, 10) : 10, points_extra ? parseInt(points_extra, 10) : 5, is_challenge || false, req.user.id]
     );
 
     res.status(201).json(result.rows[0]);
@@ -692,7 +740,7 @@ app.post('/api/admin/drills', authenticate, requireCoach, async (req, res) => {
 // PUT /api/admin/drills/:id
 app.put('/api/admin/drills/:id', authenticate, requireCoach, async (req, res) => {
   try {
-    const { date, title, description, youtube_url, target_time, points_completion, points_extra } = req.body;
+    const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge } = req.body;
 
     const result = await pool.query(
       `UPDATE drills
@@ -702,10 +750,11 @@ app.put('/api/admin/drills/:id', authenticate, requireCoach, async (req, res) =>
            youtube_url = COALESCE($4, youtube_url),
            target_time = $5,
            points_completion = COALESCE($6, 10),
-           points_extra = COALESCE($7, 5)
-       WHERE id = $8
+           points_extra = COALESCE($7, 5),
+           is_challenge = $8
+       WHERE id = $9
        RETURNING *`,
-      [date || null, title || null, description || null, youtube_url || null, target_time ? parseInt(target_time, 10) : null, points_completion ? parseInt(points_completion, 10) : null, points_extra ? parseInt(points_extra, 10) : null, req.params.id]
+      [date || null, title || null, description || null, youtube_url || null, target_time ? parseInt(target_time, 10) : null, points_completion ? parseInt(points_completion, 10) : null, points_extra ? parseInt(points_extra, 10) : null, is_challenge || false, req.params.id]
     );
 
     if (result.rows.length === 0) {
@@ -908,6 +957,14 @@ async function runMigrations() {
       await pool.query('ALTER TABLE drills ADD COLUMN points_completion INTEGER DEFAULT 10');
       await pool.query('ALTER TABLE drills ADD COLUMN points_extra INTEGER DEFAULT 5');
       console.log('Migration: added points_completion and points_extra columns to drills.');
+    }
+    // Add is_challenge column to drills if it doesn't exist
+    const ccol = await pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'drills' AND column_name = 'is_challenge'"
+    );
+    if (ccol.rows.length === 0) {
+      await pool.query('ALTER TABLE drills ADD COLUMN is_challenge BOOLEAN DEFAULT false');
+      console.log('Migration: added is_challenge column to drills.');
     }
   } catch (err) {
     console.error('Migration error:', err);

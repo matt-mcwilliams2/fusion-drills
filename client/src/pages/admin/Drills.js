@@ -7,7 +7,7 @@ export default function Drills() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5' });
+  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5', is_challenge: false });
   const [saving, setSaving] = useState(false);
 
   const loadDrills = async () => {
@@ -22,13 +22,13 @@ export default function Drills() {
 
   const openAdd = () => {
     setEditing(null);
-    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5' });
+    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5', is_challenge: false });
     setShowModal(true);
   };
 
   const openEdit = (drill) => {
     setEditing(drill);
-    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '', target_time: drill.target_time || '', points_completion: drill.points_completion != null ? drill.points_completion : '10', points_extra: drill.points_extra != null ? drill.points_extra : '5' });
+    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '', target_time: drill.target_time || '', points_completion: drill.points_completion != null ? drill.points_completion : '10', points_extra: drill.points_extra != null ? drill.points_extra : '5', is_challenge: drill.is_challenge || false });
     setShowModal(true);
   };
 
@@ -74,7 +74,7 @@ export default function Drills() {
       {drills.map((d) => (
         <div key={d.id} className="drill-row">
           <div className="drill-row-header">
-            <span className="drill-row-date">{formatDate(d.date)}</span>
+            <span className="drill-row-date">{formatDate(d.date)}{d.is_challenge && <span className="challenge-badge-sm">Challenge</span>}</span>
           </div>
           <div className="drill-row-title">{d.title}</div>
           <div className="drill-row-actions">
@@ -111,6 +111,10 @@ export default function Drills() {
                 <label className="form-label">Target Time (minutes)</label>
                 <input className="form-input" type="number" min="1" value={form.target_time} onChange={(e) => setForm({...form, target_time: e.target.value})} placeholder="e.g. 15" />
               </div>
+              <label className="form-checkbox">
+                <input type="checkbox" checked={form.is_challenge} onChange={(e) => setForm({...form, is_challenge: e.target.checked})} />
+                <span>Challenge Day</span>
+              </label>
               <div className="form-row">
                 <div className="form-group form-group-half">
                   <label className="form-label">Points: Completion</label>

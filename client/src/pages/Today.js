@@ -148,9 +148,10 @@ export default function Today() {
     if (completion) {
       return (
         <div className="card">
-          <div className="card-date">{formatDateHeading(drill.date)}</div>
+          <div className="card-date">{formatDateHeading(drill.date)}{drill.is_challenge && <span className="challenge-badge">Challenge Day</span>}</div>
           <h2 className="card-title">{drill.title}</h2>
           <p className="card-desc">{drill.description}</p>
+          {drill.target_time && <div className="card-target-time">Target Time: {drill.target_time} min</div>}
           {drill.youtube_url && (
             <div className="video-wrapper">
               <iframe
@@ -174,9 +175,10 @@ export default function Today() {
     return (
       <>
         <div className="card">
-          <div className="card-date">{formatDateHeading(drill.date)}</div>
+          <div className="card-date">{formatDateHeading(drill.date)}{drill.is_challenge && <span className="challenge-badge">Challenge Day</span>}</div>
           <h2 className="card-title">{drill.title}</h2>
           <p className="card-desc">{drill.description}</p>
+          {drill.target_time && <div className="card-target-time">Target Time: {drill.target_time} min</div>}
           {drill.youtube_url && (
             <div className="video-wrapper">
               <iframe
@@ -198,13 +200,13 @@ export default function Today() {
               />
               <span className="extra-check-label">I did 15+ extra minutes</span>
             </label>
-            <div className="mt-12">
+            <div className="mt-12" style={{ textAlign: 'center' }}>
               <button
                 className="btn btn-orange did-it-btn"
                 onClick={handleComplete}
                 disabled={completing}
               >
-                {completing ? 'Saving...' : '\u26BD I did it!'}
+                {completing ? 'Saving...' : drill.target_time ? `\u26BD I did ${drill.target_time} minutes!` : '\u26BD I did it!'}
               </button>
             </div>
           </>

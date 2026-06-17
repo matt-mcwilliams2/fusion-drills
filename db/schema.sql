@@ -32,6 +32,7 @@ CREATE TABLE drills (
     target_time INTEGER,
     points_completion INTEGER DEFAULT 10,
     points_extra INTEGER DEFAULT 5,
+    is_challenge BOOLEAN DEFAULT false,
     created_by INTEGER REFERENCES users(id),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
