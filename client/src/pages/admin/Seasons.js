@@ -6,7 +6,9 @@ export default function Seasons() {
   const [seasons, setSeasons] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [editingSeason, setEditingSeason] = useState(null);
   const [form, setForm] = useState({ name: '', start_date: '', end_date: '' });
+  const [editForm, setEditForm] = useState({ name: '', start_date: '', end_date: '' });
   const [saving, setSaving] = useState(false);
 
   const loadSeasons = async () => {
@@ -39,11 +41,34 @@ export default function Seasons() {
   };
 
   const handleDelete = async (season) => {
-    if (!window.confirm(`Delete the "${season.name}" season?`)) return;
+    if (!window.confirm(`Delete the "${season.name}" challenge?`)) return;
     try {
       await apiFetch(`/api/admin/seasons/${season.id}`, { method: 'DELETE' });
       loadSeasons();
     } catch (err) { alert(err.message); }
+  };
+
+  const openEdit = (season) => {
+    setEditingSeason(season);
+    setEditForm({
+      name: season.name,
+      start_date: (season.start_date || '').split('T')[0],
+      end_date: (season.end_date || '').split('T')[0],
+    });
+  };
+
+  const handleEdit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await apiFetch(`/api/admin/seasons/${editingSeason.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(editForm),
+      });
+      setEditingSeason(null);
+      loadSeasons();
+    } catch (err) { alert(err.message); }
+    finally { setSaving(false); }
   };
 
   const formatDate = (dateStr) => {
@@ -56,8 +81,8 @@ export default function Seasons() {
   return (
     <div className="admin-page">
       <div className="flex-between mb-16">
-        <h1 className="page-title" style={{ marginBottom: 0 }}>Seasons</h1>
-        <button className="btn btn-orange btn-sm" onClick={() => setShowAdd(true)}>+ Add Season</button>
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Challenges</h1>
+        <button className="btn btn-orange btn-sm" onClick={() => setShowAdd(true)}>+ Add Challenge</button>
       </div>
 
       {seasons.map((s) => (
@@ -72,20 +97,21 @@ export default function Seasons() {
             ) : (
               <button className="btn btn-blue btn-sm" onClick={() => handleActivate(s.id)}>Set Active</button>
             )}
+            <button className="btn btn-outline btn-sm" onClick={() => openEdit(s)}>Edit</button>
             <button className="btn btn-danger btn-sm" onClick={() => handleDelete(s)}>Delete</button>
           </div>
         </div>
       ))}
 
-      {seasons.length === 0 && <div className="no-season-msg">No seasons created yet.</div>}
+      {seasons.length === 0 && <div className="no-season-msg">No challenges created yet.</div>}
 
       {showAdd && (
         <div className="modal-overlay" onClick={() => setShowAdd(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>Add Season</h2>
+            <h2>Add Challenge</h2>
             <form onSubmit={handleAdd}>
               <div className="form-group">
-                <label className="form-label">Season Name</label>
+                <label className="form-label">Challenge Name</label>
                 <input className="form-input" value={form.name} onChange={(e) => setForm({...form, name: e.target.value})} placeholder="e.g. Summer 2025" required />
               </div>
               <div className="form-group">
@@ -98,7 +124,33 @@ export default function Seasons() {
               </div>
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={() => setShowAdd(false)}>Cancel</button>
-                <button type="submit" className="btn btn-orange" disabled={saving}>{saving ? 'Creating...' : 'Create Season'}</button>
+                <button type="submit" className="btn btn-orange" disabled={saving}>{saving ? 'Creating...' : 'Create Challenge'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingSeason && (
+        <div className="modal-overlay" onClick={() => setEditingSeason(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Edit Challenge</h2>
+            <form onSubmit={handleEdit}>
+              <div className="form-group">
+                <label className="form-label">Challenge Name</label>
+                <input className="form-input" value={editForm.name} onChange={(e) => setEditForm({...editForm, name: e.target.value})} required />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Start Date</label>
+                <input className="form-input" type="date" value={editForm.start_date} onChange={(e) => setEditForm({...editForm, start_date: e.target.value})} required />
+              </div>
+              <div className="form-group">
+                <label className="form-label">End Date</label>
+                <input className="form-input" type="date" value={editForm.end_date} onChange={(e) => setEditForm({...editForm, end_date: e.target.value})} required />
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-outline" onClick={() => setEditingSeason(null)}>Cancel</button>
+                <button type="submit" className="btn btn-orange" disabled={saving}>{saving ? 'Saving...' : 'Save Changes'}</button>
               </div>
             </form>
           </div>

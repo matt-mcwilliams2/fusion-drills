@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { useAuth } from '../context/AuthContext';
-import LevelShield from '../components/LevelShield';
+import { useAuth } from '../../context/AuthContext';
+import LevelShield from '../../components/LevelShield';
 
-export default function Leaderboard() {
-  const { apiFetch, user } = useAuth();
+export default function AdminLeaderboard() {
+  const { apiFetch } = useAuth();
   const [players, setPlayers] = useState([]);
   const [season, setSeason] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -19,27 +19,27 @@ export default function Leaderboard() {
   }, [apiFetch]);
 
   if (loading) {
-    return <div className="page"><div className="loading"><div className="spinner" /></div></div>;
+    return <div className="admin-page"><div className="loading"><div className="spinner" /></div></div>;
   }
 
   if (!season) {
     return (
-      <div className="page">
+      <div className="admin-page">
         <h1 className="page-title">Leaderboard</h1>
-        <div className="no-season-msg">No active challenge set by coach.</div>
+        <div className="no-season-msg">No active challenge set. Go to Challenges to activate one.</div>
       </div>
     );
   }
 
   return (
-    <div className="page">
+    <div className="admin-page">
       <div className="flex-between mb-16">
         <h1 className="page-title" style={{ marginBottom: 0 }}>Leaderboard</h1>
         <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{season.name}</span>
       </div>
       <div className="leaderboard-list">
         {players.map((p, i) => (
-          <div key={p.id} className={`leaderboard-row ${p.id === user.id ? 'me' : ''}`}>
+          <div key={p.id} className="leaderboard-row">
             <div className={`lb-rank ${i < 3 ? 'top-3' : ''}`}>{i + 1}</div>
             <div className="lb-avatar" style={{ background: p.avatar_color || '#f77c00' }}>
               {p.first_name[0]}{p.last_name[0]}

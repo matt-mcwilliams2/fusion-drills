@@ -24,7 +24,10 @@ export default function AdminLayout() {
           Drills
         </NavLink>
         <NavLink to="/admin/seasons" className={({ isActive }) => `admin-nav-item ${isActive ? 'active' : ''}`}>
-          Seasons
+          Challenges
+        </NavLink>
+        <NavLink to="/admin/leaderboard" className={({ isActive }) => `admin-nav-item ${isActive ? 'active' : ''}`}>
+          Leaderboard
         </NavLink>
         <NavLink to="/admin/invite" className={({ isActive }) => `admin-nav-item ${isActive ? 'active' : ''}`}>
           Invite Coach

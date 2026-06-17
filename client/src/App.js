@@ -10,6 +10,7 @@ import AdminLayout from './pages/AdminLayout';
 import Roster from './pages/admin/Roster';
 import Drills from './pages/admin/Drills';
 import Seasons from './pages/admin/Seasons';
+import AdminLeaderboard from './pages/admin/Leaderboard';
 import InviteCoach from './pages/admin/InviteCoach';
 
 function ProtectedRoute({ children, role }) {
@@ -37,6 +38,7 @@ function AppRoutes() {
         <Route index element={<Roster />} />
         <Route path="drills" element={<Drills />} />
         <Route path="seasons" element={<Seasons />} />
+        <Route path="leaderboard" element={<AdminLeaderboard />} />
         <Route path="invite" element={<InviteCoach />} />
       </Route>
       <Route path="*" element={<Navigate to="/" />} />
