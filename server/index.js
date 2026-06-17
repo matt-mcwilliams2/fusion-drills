@@ -776,16 +776,20 @@ app.get('*', (req, res) => {
 
 async function initDatabase() {
   try {
-    // Check if tables already exist
-    const check = await pool.query(
-      "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users')"
-    );
-    if (check.rows[0].exists) {
-      console.log('Database tables already exist, skipping init.');
-      return;
+    // Check if tables already exist (skip unless RESET_DB is set)
+    if (!process.env.RESET_DB) {
+      const check = await pool.query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users')"
+      );
+      if (check.rows[0].exists) {
+        console.log('Database tables already exist, skipping init.');
+        return;
+      }
+    } else {
+      console.log('RESET_DB is set — forcing re-init...');
     }
 
-    console.log('Tables not found — running schema and seed...');
+    console.log('Running schema and seed...');
 
     const schemaPath = path.join(__dirname, '../db/schema.sql');
     const seedPath = path.join(__dirname, '../db/seed.sql');

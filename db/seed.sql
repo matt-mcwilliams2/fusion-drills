@@ -18,14 +18,14 @@ INSERT INTO badges (slug, name, description, icon_emoji) VALUES
 
 -- Coach
 INSERT INTO users (username, password_hash, role, first_name, last_name) VALUES
-    ('coach_matt', '$2b$10$LQ0wMxJgL8VPmMnSYmLOr.NBmGmYX7RCYFtmgOFnmLSPqXBHMbAMu', 'coach', 'Matt', 'Williams');
+    ('coach_matt', '$2b$10$BmJLtx1qOoRKCKHrOL13SuDEStyR5/9ivU18BEVQ./Gyg/E6TCzFe', 'coach', 'Matt', 'Williams');
 
 -- Players
 INSERT INTO users (username, password_hash, role, first_name, last_name) VALUES
-    ('alex_j',    '$2b$10$LQ0wMxJgL8VPmMnSYmLOr.NFmGmYX7RCYFtmgOFnmLSPqXBHMbAMu', 'player', 'Alex',   'Johnson'),
-    ('sam_r',     '$2b$10$LQ0wMxJgL8VPmMnSYmLOr.NFmGmYX7RCYFtmgOFnmLSPqXBHMbAMu', 'player', 'Sam',    'Rodriguez'),
-    ('jordan_k',  '$2b$10$LQ0wMxJgL8VPmMnSYmLOr.NFmGmYX7RCYFtmgOFnmLSPqXBHMbAMu', 'player', 'Jordan', 'Kim'),
-    ('taylor_m',  '$2b$10$LQ0wMxJgL8VPmMnSYmLOr.NFmGmYX7RCYFtmgOFnmLSPqXBHMbAMu', 'player', 'Taylor', 'Martinez');
+    ('alex_j',    '$2b$10$lutd5KBZOZUc/2Ym5Vb3A.x5NROPAf8J9hEITzugl5JZIgU5/ihIW', 'player', 'Alex',   'Johnson'),
+    ('sam_r',     '$2b$10$lutd5KBZOZUc/2Ym5Vb3A.x5NROPAf8J9hEITzugl5JZIgU5/ihIW', 'player', 'Sam',    'Rodriguez'),
+    ('jordan_k',  '$2b$10$lutd5KBZOZUc/2Ym5Vb3A.x5NROPAf8J9hEITzugl5JZIgU5/ihIW', 'player', 'Jordan', 'Kim'),
+    ('taylor_m',  '$2b$10$lutd5KBZOZUc/2Ym5Vb3A.x5NROPAf8J9hEITzugl5JZIgU5/ihIW', 'player', 'Taylor', 'Martinez');
 
 -- ============================================================
 -- Drills (scheduled for today, tomorrow, and day after tomorrow)
