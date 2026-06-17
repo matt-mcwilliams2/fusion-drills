@@ -64,6 +64,22 @@ function getLevelInfo(points) {
 }
 
 // ============================================================
+// SEASON HELPER
+// ============================================================
+
+/**
+ * If the active season's end_date is in the past, extend it to today
+ * for calculation purposes. An "active" season should always include
+ * current activity.
+ */
+function effectiveEndDate(season) {
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const end = season.end_date instanceof Date ? season.end_date : new Date(season.end_date);
+  return end >= today ? season.end_date : today;
+}
+
+// ============================================================
 // AUTH MIDDLEWARE
 // ============================================================
 
@@ -256,9 +272,10 @@ async function checkAndAwardBadges(userId) {
   const season = seasonResult.rows[0];
   if (!season) return [];
 
-  const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(userId, season.start_date, season.end_date);
-  const currentStreak = await calculateCurrentStreak(userId, season.start_date, season.end_date);
-  const drills = await getSeasonDrills(userId, season.start_date, season.end_date);
+  const endDate = effectiveEndDate(season);
+  const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(userId, season.start_date, endDate);
+  const currentStreak = await calculateCurrentStreak(userId, season.start_date, endDate);
+  const drills = await getSeasonDrills(userId, season.start_date, endDate);
 
   // Check perfect week (already calculated in calculatePlayerPoints but we need the boolean)
   const weekMap = {};
@@ -292,7 +309,7 @@ async function checkAndAwardBadges(userId) {
      JOIN drills d ON d.id = c.drill_id
      WHERE c.user_id = $1 AND d.is_challenge = true
        AND d.date BETWEEN $2 AND $3`,
-    [userId, season.start_date, season.end_date]
+    [userId, season.start_date, endDate]
   );
   const challengeCount = parseInt(challengeResult.rows[0].cnt, 10);
 
@@ -305,7 +322,7 @@ async function checkAndAwardBadges(userId) {
     let topPoints = 0;
     let topId = null;
     for (const p of playersResult.rows) {
-      const { totalPoints: pp } = await calculatePlayerPoints(p.id, season.start_date, season.end_date);
+      const { totalPoints: pp } = await calculatePlayerPoints(p.id, season.start_date, endDate);
       if (pp > topPoints) { topPoints = pp; topId = p.id; }
     }
     isWeeklyWinner = topId === userId && topPoints > 0;
@@ -547,7 +564,7 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
       const seasonCheck = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
       if (seasonCheck.rows.length > 0) {
         const s = seasonCheck.rows[0];
-        const { totalPoints: ptsBefore } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
+        const { totalPoints: ptsBefore } = await calculatePlayerPoints(req.user.id, s.start_date, effectiveEndDate(s));
         levelBefore = getLevelInfo(ptsBefore);
       }
     } catch (levelErr) {
@@ -582,7 +599,7 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
       const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
       if (seasonResult.rows.length > 0) {
         const s = seasonResult.rows[0];
-        const { totalPoints: ptsAfter } = await calculatePlayerPoints(req.user.id, s.start_date, s.end_date);
+        const { totalPoints: ptsAfter } = await calculatePlayerPoints(req.user.id, s.start_date, effectiveEndDate(s));
         level = getLevelInfo(ptsAfter);
         if (levelBefore && level.name !== levelBefore.name) {
           levelUp = level;
@@ -622,10 +639,11 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
     );
 
     // Calculate points, completions, streak, and level for each player
+    const endDate = effectiveEndDate(season);
     const players = [];
     for (const player of playersResult.rows) {
-      const { totalPoints, totalCompletions } = await calculatePlayerPoints(player.id, season.start_date, season.end_date);
-      const current_streak = await calculateCurrentStreak(player.id, season.start_date, season.end_date);
+      const { totalPoints, totalCompletions } = await calculatePlayerPoints(player.id, season.start_date, endDate);
+      const current_streak = await calculateCurrentStreak(player.id, season.start_date, endDate);
       players.push({
         id: player.id,
         first_name: player.first_name,
@@ -669,10 +687,11 @@ app.get('/api/me/stats', authenticate, async (req, res) => {
     }
 
     const season = seasonResult.rows[0];
+    const endDate = effectiveEndDate(season);
 
-    const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(req.user.id, season.start_date, season.end_date);
-    const currentStreak = await calculateCurrentStreak(req.user.id, season.start_date, season.end_date);
-    const longestStreak = await calculateLongestStreak(req.user.id, season.start_date, season.end_date);
+    const { totalPoints, totalCompletions, extraCount } = await calculatePlayerPoints(req.user.id, season.start_date, endDate);
+    const currentStreak = await calculateCurrentStreak(req.user.id, season.start_date, endDate);
+    const longestStreak = await calculateLongestStreak(req.user.id, season.start_date, endDate);
 
     res.json({
       current_streak: currentStreak,
