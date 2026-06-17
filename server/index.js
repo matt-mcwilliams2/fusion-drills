@@ -555,6 +555,29 @@ app.put('/api/admin/players/:id/reset-password', authenticate, requireCoach, asy
   }
 });
 
+// DELETE /api/admin/players/:id
+app.delete('/api/admin/players/:id', authenticate, requireCoach, async (req, res) => {
+  try {
+    // Delete related data first
+    await pool.query('DELETE FROM user_badges WHERE user_id = $1', [req.params.id]);
+    await pool.query('DELETE FROM completions WHERE user_id = $1', [req.params.id]);
+
+    const result = await pool.query(
+      "DELETE FROM users WHERE id = $1 AND role = 'player' RETURNING id",
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
+
+    res.json({ message: 'Player deleted' });
+  } catch (err) {
+    console.error('Delete player error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // --- Drills ---
 
 // GET /api/admin/drills
@@ -729,6 +752,25 @@ app.put('/api/admin/seasons/:id/activate', authenticate, requireCoach, async (re
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Activate season error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/seasons/:id
+app.delete('/api/admin/seasons/:id', authenticate, requireCoach, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM seasons WHERE id = $1 RETURNING id',
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Season not found' });
+    }
+
+    res.json({ message: 'Season deleted' });
+  } catch (err) {
+    console.error('Delete season error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

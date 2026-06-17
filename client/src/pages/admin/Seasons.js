@@ -38,6 +38,14 @@ export default function Seasons() {
     } catch (err) { alert(err.message); }
   };
 
+  const handleDelete = async (season) => {
+    if (!window.confirm(`Delete the "${season.name}" season?`)) return;
+    try {
+      await apiFetch(`/api/admin/seasons/${season.id}`, { method: 'DELETE' });
+      loadSeasons();
+    } catch (err) { alert(err.message); }
+  };
+
   const formatDate = (dateStr) => {
     const d = new Date(dateStr + 'T00:00:00');
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -58,11 +66,14 @@ export default function Seasons() {
             <h3>{s.name}</h3>
             <div className="season-dates">{formatDate(s.start_date)} — {formatDate(s.end_date)}</div>
           </div>
-          {s.active ? (
-            <span className="season-active-badge">Active</span>
-          ) : (
-            <button className="btn btn-blue btn-sm" onClick={() => handleActivate(s.id)}>Set Active</button>
-          )}
+          <div className="player-actions">
+            {s.active ? (
+              <span className="season-active-badge">Active</span>
+            ) : (
+              <button className="btn btn-blue btn-sm" onClick={() => handleActivate(s.id)}>Set Active</button>
+            )}
+            <button className="btn btn-danger btn-sm" onClick={() => handleDelete(s)}>Delete</button>
+          </div>
         </div>
       ))}
 

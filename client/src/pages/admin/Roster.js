@@ -43,6 +43,14 @@ export default function Roster() {
     } catch (err) { alert(err.message); }
   };
 
+  const handleDelete = async (player) => {
+    if (!window.confirm(`Permanently delete ${player.first_name} ${player.last_name}? This removes all their completions and badges.`)) return;
+    try {
+      await apiFetch(`/api/admin/players/${player.id}`, { method: 'DELETE' });
+      loadPlayers();
+    } catch (err) { alert(err.message); }
+  };
+
   const handleReset = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -81,11 +89,19 @@ export default function Roster() {
                 <button className="btn btn-outline btn-sm" onClick={() => handleToggle(p.id, true)}>
                   Deactivate
                 </button>
+                <button className="btn btn-danger btn-sm" onClick={() => handleDelete(p)}>
+                  Delete
+                </button>
               </>
             ) : (
-              <button className="btn btn-blue btn-sm" onClick={() => handleToggle(p.id, false)}>
-                Activate
-              </button>
+              <>
+                <button className="btn btn-blue btn-sm" onClick={() => handleToggle(p.id, false)}>
+                  Activate
+                </button>
+                <button className="btn btn-danger btn-sm" onClick={() => handleDelete(p)}>
+                  Delete
+                </button>
+              </>
             )}
           </div>
         </div>
