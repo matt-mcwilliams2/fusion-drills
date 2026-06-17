@@ -1,5 +1,6 @@
 require('dotenv').config({ path: '../.env' });
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -768,10 +769,49 @@ app.get('*', (req, res) => {
 });
 
 // ============================================================
+// DATABASE AUTO-INIT
+// ============================================================
+
+async function initDatabase() {
+  try {
+    // Check if tables already exist
+    const check = await pool.query(
+      "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users')"
+    );
+    if (check.rows[0].exists) {
+      console.log('Database tables already exist, skipping init.');
+      return;
+    }
+
+    console.log('Tables not found — running schema and seed...');
+
+    const schemaPath = path.join(__dirname, '../db/schema.sql');
+    const seedPath = path.join(__dirname, '../db/seed.sql');
+
+    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+    const seedSql = fs.readFileSync(seedPath, 'utf8');
+
+    await pool.query(schemaSql);
+    console.log('Schema created.');
+
+    await pool.query(seedSql);
+    console.log('Seed data inserted.');
+
+    console.log('Database initialization complete.');
+  } catch (err) {
+    console.error('Database init error:', err);
+    // Don't crash — the app may still work if tables were partially created
+  }
+}
+
+// ============================================================
 // START SERVER
 // ============================================================
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Fusion FC Training server running on port ${PORT}`);
+
+initDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Fusion FC Training server running on port ${PORT}`);
+  });
 });
