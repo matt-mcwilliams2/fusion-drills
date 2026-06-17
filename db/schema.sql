@@ -29,6 +29,9 @@ CREATE TABLE drills (
     title VARCHAR(200) NOT NULL,
     description TEXT,
     youtube_url VARCHAR(500),
+    target_time INTEGER,
+    points_completion INTEGER DEFAULT 10,
+    points_extra INTEGER DEFAULT 5,
     created_by INTEGER REFERENCES users(id),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );

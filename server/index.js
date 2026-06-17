@@ -138,7 +138,7 @@ async function checkAndAwardBadges(userId) {
   const statsResult = await pool.query(
     `SELECT
        COUNT(c.id) as total_completions,
-       COALESCE(SUM(CASE WHEN c.did_extra THEN 15 ELSE 10 END), 0) as total_points,
+       COALESCE(SUM(COALESCE(d.points_completion, 10) + CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END), 0) as total_points,
        COUNT(CASE WHEN c.did_extra THEN 1 END) as extra_count
      FROM completions c
      JOIN drills d ON d.id = c.drill_id
@@ -267,6 +267,7 @@ app.get('/api/drills/today', authenticate, async (req, res) => {
       title: row.title,
       description: row.description,
       youtube_url: row.youtube_url,
+      target_time: row.target_time,
       created_by: row.created_by,
       created_at: row.created_at,
     };
@@ -317,6 +318,7 @@ app.get('/api/drills/date/:date', authenticate, async (req, res) => {
       title: row.title,
       description: row.description,
       youtube_url: row.youtube_url,
+      target_time: row.target_time,
       created_by: row.created_by,
       created_at: row.created_at,
     };
@@ -407,7 +409,7 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
     const playersResult = await pool.query(
       `SELECT u.id, u.first_name, u.last_name, u.avatar_color,
               COUNT(c.id) as completions,
-              COALESCE(SUM(CASE WHEN c.id IS NOT NULL THEN CASE WHEN c.did_extra THEN 15 ELSE 10 END ELSE 0 END), 0) as points
+              COALESCE(SUM(CASE WHEN c.id IS NOT NULL THEN COALESCE(d.points_completion, 10) + CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END ELSE 0 END), 0) as points
        FROM users u
        LEFT JOIN drills d ON d.date BETWEEN $1 AND $2
        LEFT JOIN completions c ON c.user_id = u.id AND c.drill_id = d.id
@@ -464,7 +466,7 @@ app.get('/api/me/stats', authenticate, async (req, res) => {
     const statsResult = await pool.query(
       `SELECT
          COUNT(c.id) as total_completions,
-         COALESCE(SUM(CASE WHEN c.did_extra THEN 15 ELSE 10 END), 0) as total_points,
+         COALESCE(SUM(COALESCE(d.points_completion, 10) + CASE WHEN c.did_extra THEN COALESCE(d.points_extra, 5) ELSE 0 END), 0) as total_points,
          COUNT(CASE WHEN c.did_extra THEN 1 END) as extra_count
        FROM completions c
        JOIN drills d ON d.id = c.drill_id
@@ -665,16 +667,16 @@ app.get('/api/admin/drills', authenticate, requireCoach, async (req, res) => {
 // POST /api/admin/drills
 app.post('/api/admin/drills', authenticate, requireCoach, async (req, res) => {
   try {
-    const { date, title, description, youtube_url } = req.body;
+    const { date, title, description, youtube_url, target_time, points_completion, points_extra } = req.body;
     if (!date || !title) {
       return res.status(400).json({ error: 'Date and title are required' });
     }
 
     const result = await pool.query(
-      `INSERT INTO drills (date, title, description, youtube_url, created_by)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO drills (date, title, description, youtube_url, target_time, points_completion, points_extra, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [date, title, description || null, youtube_url || null, req.user.id]
+      [date, title, description || null, youtube_url || null, target_time ? parseInt(target_time, 10) : null, points_completion ? parseInt(points_completion, 10) : 10, points_extra ? parseInt(points_extra, 10) : 5, req.user.id]
     );
 
     res.status(201).json(result.rows[0]);
@@ -690,17 +692,20 @@ app.post('/api/admin/drills', authenticate, requireCoach, async (req, res) => {
 // PUT /api/admin/drills/:id
 app.put('/api/admin/drills/:id', authenticate, requireCoach, async (req, res) => {
   try {
-    const { date, title, description, youtube_url } = req.body;
+    const { date, title, description, youtube_url, target_time, points_completion, points_extra } = req.body;
 
     const result = await pool.query(
       `UPDATE drills
        SET date = COALESCE($1, date),
            title = COALESCE($2, title),
            description = COALESCE($3, description),
-           youtube_url = COALESCE($4, youtube_url)
-       WHERE id = $5
+           youtube_url = COALESCE($4, youtube_url),
+           target_time = $5,
+           points_completion = COALESCE($6, 10),
+           points_extra = COALESCE($7, 5)
+       WHERE id = $8
        RETURNING *`,
-      [date || null, title || null, description || null, youtube_url || null, req.params.id]
+      [date || null, title || null, description || null, youtube_url || null, target_time ? parseInt(target_time, 10) : null, points_completion ? parseInt(points_completion, 10) : null, points_extra ? parseInt(points_extra, 10) : null, req.params.id]
     );
 
     if (result.rows.length === 0) {
@@ -885,6 +890,30 @@ app.get('*', (req, res) => {
 // DATABASE AUTO-INIT
 // ============================================================
 
+async function runMigrations() {
+  try {
+    // Add target_time column to drills if it doesn't exist
+    const col = await pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'drills' AND column_name = 'target_time'"
+    );
+    if (col.rows.length === 0) {
+      await pool.query('ALTER TABLE drills ADD COLUMN target_time INTEGER');
+      console.log('Migration: added target_time column to drills.');
+    }
+    // Add points_completion and points_extra columns to drills if they don't exist
+    const pcol = await pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'drills' AND column_name = 'points_completion'"
+    );
+    if (pcol.rows.length === 0) {
+      await pool.query('ALTER TABLE drills ADD COLUMN points_completion INTEGER DEFAULT 10');
+      await pool.query('ALTER TABLE drills ADD COLUMN points_extra INTEGER DEFAULT 5');
+      console.log('Migration: added points_completion and points_extra columns to drills.');
+    }
+  } catch (err) {
+    console.error('Migration error:', err);
+  }
+}
+
 async function initDatabase() {
   try {
     // Check if tables already exist (skip unless RESET_DB is set)
@@ -894,6 +923,8 @@ async function initDatabase() {
       );
       if (check.rows[0].exists) {
         console.log('Database tables already exist, skipping init.');
+        // Run migrations for existing databases
+        await runMigrations();
         return;
       }
     } else {

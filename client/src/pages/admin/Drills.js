@@ -7,7 +7,7 @@ export default function Drills() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '' });
+  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5' });
   const [saving, setSaving] = useState(false);
 
   const loadDrills = async () => {
@@ -22,13 +22,13 @@ export default function Drills() {
 
   const openAdd = () => {
     setEditing(null);
-    setForm({ date: '', title: '', description: '', youtube_url: '' });
+    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5' });
     setShowModal(true);
   };
 
   const openEdit = (drill) => {
     setEditing(drill);
-    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '' });
+    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '', target_time: drill.target_time || '', points_completion: drill.points_completion != null ? drill.points_completion : '10', points_extra: drill.points_extra != null ? drill.points_extra : '5' });
     setShowModal(true);
   };
 
@@ -106,6 +106,20 @@ export default function Drills() {
               <div className="form-group">
                 <label className="form-label">YouTube URL</label>
                 <input className="form-input" value={form.youtube_url} onChange={(e) => setForm({...form, youtube_url: e.target.value})} placeholder="https://youtube.com/watch?v=..." />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Target Time (minutes)</label>
+                <input className="form-input" type="number" min="1" value={form.target_time} onChange={(e) => setForm({...form, target_time: e.target.value})} placeholder="e.g. 15" />
+              </div>
+              <div className="form-row">
+                <div className="form-group form-group-half">
+                  <label className="form-label">Points: Completion</label>
+                  <input className="form-input" type="number" min="0" value={form.points_completion} onChange={(e) => setForm({...form, points_completion: e.target.value})} />
+                </div>
+                <div className="form-group form-group-half">
+                  <label className="form-label">Points: Extra 15 min</label>
+                  <input className="form-input" type="number" min="0" value={form.points_extra} onChange={(e) => setForm({...form, points_extra: e.target.value})} />
+                </div>
               </div>
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={() => setShowModal(false)}>Cancel</button>

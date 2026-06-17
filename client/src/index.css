@@ -290,6 +290,13 @@ body {
   margin-bottom: 16px;
 }
 
+.card-target-time {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--white);
+  margin-bottom: 16px;
+}
+
 /* YouTube Embed */
 .video-wrapper {
   position: relative;
@@ -702,6 +709,15 @@ body {
 .form-textarea {
   min-height: 80px;
   resize: vertical;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.form-group-half {
+  flex: 1;
 }
 
 /* Player List in Admin */
