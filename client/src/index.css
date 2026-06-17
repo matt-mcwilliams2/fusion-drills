@@ -93,7 +93,7 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 14px 24px;
+  padding: 14px 12px;
   border: none;
   border-radius: 12px;
   font-size: 1rem;
@@ -111,7 +111,9 @@ body {
 .btn-orange {
   background: var(--orange);
   color: var(--white);
-  width: 100%;
+  width: 50%;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .btn-orange:hover {
@@ -143,7 +145,7 @@ body {
 }
 
 .btn-sm {
-  padding: 8px 16px;
+  padding: 8px 8px;
   font-size: 0.875rem;
   border-radius: 8px;
 }
@@ -310,8 +312,8 @@ body {
 
 /* Did It Button */
 .did-it-btn {
-  width: 100%;
-  padding: 18px;
+  width: 50%;
+  padding: 18px 9px;
   font-size: 1.2rem;
   font-weight: 700;
   border-radius: 16px;
