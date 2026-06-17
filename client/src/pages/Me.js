@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import LevelShield from '../components/LevelShield';
+import Avatar from '../components/Avatar';
 
 export default function Me() {
   const { apiFetch, user } = useAuth();
@@ -25,12 +26,19 @@ export default function Me() {
   }
 
   const level = stats?.level;
+  const earnedBadges = badges.filter(b => b.earned_at);
+  const latestBadge = earnedBadges.length > 0
+    ? earnedBadges.reduce((a, b) => new Date(a.earned_at) > new Date(b.earned_at) ? a : b)
+    : null;
 
   return (
     <div className="page">
-      <h1 className="page-title">
-        {user.first_name} {user.last_name}
-      </h1>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+        <Avatar firstName={user.first_name} lastName={user.last_name} level={level} latestBadgeEmoji={latestBadge?.icon_emoji} size={56} />
+        <h1 className="page-title" style={{ marginBottom: 0 }}>
+          {user.first_name} {user.last_name}
+        </h1>
+      </div>
 
       {level && (
         <div className="level-section">

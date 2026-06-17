@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import LevelShield from '../components/LevelShield';
+import Avatar from '../components/Avatar';
 
 export default function Leaderboard() {
   const { apiFetch, user } = useAuth();
@@ -41,9 +42,7 @@ export default function Leaderboard() {
         {players.map((p, i) => (
           <div key={p.id} className={`leaderboard-row ${p.id === user.id ? 'me' : ''}`}>
             <div className={`lb-rank ${i < 3 ? 'top-3' : ''}`}>{i + 1}</div>
-            <div className="lb-avatar" style={{ background: p.avatar_color || '#f77c00' }}>
-              {p.first_name[0]}{p.last_name[0]}
-            </div>
+            <Avatar firstName={p.first_name} lastName={p.last_name} level={p.level} latestBadgeEmoji={p.latest_badge_emoji} size={38} />
             <div className="lb-info">
               <div className="lb-name">
                 {p.level && <LevelShield name={p.level.name} color={p.level.color} textColor={p.level.textColor} size="small" />}

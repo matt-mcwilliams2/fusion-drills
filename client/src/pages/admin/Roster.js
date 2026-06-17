@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import Avatar from '../../components/Avatar';
 
 export default function Roster() {
   const { apiFetch } = useAuth();
@@ -76,9 +77,12 @@ export default function Roster() {
 
       {players.map((p) => (
         <div key={p.id} className={`player-row ${!p.active ? 'inactive' : ''}`}>
-          <div className="player-info">
-            <div className="player-name">{p.first_name} {p.last_name}</div>
-            <div className="player-username">@{p.username}{!p.active ? ' (inactive)' : ''}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Avatar firstName={p.first_name} lastName={p.last_name} level={p.level} latestBadgeEmoji={p.latest_badge_emoji} size={34} />
+            <div className="player-info">
+              <div className="player-name">{p.first_name} {p.last_name}</div>
+              <div className="player-username">@{p.username}{!p.active ? ' (inactive)' : ''}</div>
+            </div>
           </div>
           <div className="player-actions">
             {p.active ? (

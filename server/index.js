@@ -687,6 +687,18 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
        WHERE role = 'player' AND active = true`
     );
 
+    // Get latest badge emoji for each player in one query
+    const latestBadgesResult = await pool.query(
+      `SELECT DISTINCT ON (ub.user_id) ub.user_id, b.icon_emoji
+       FROM user_badges ub
+       JOIN badges b ON b.id = ub.badge_id
+       ORDER BY ub.user_id, ub.earned_at DESC`
+    );
+    const latestBadgeMap = {};
+    for (const row of latestBadgesResult.rows) {
+      latestBadgeMap[row.user_id] = row.icon_emoji;
+    }
+
     // Calculate points, completions, streak, and level for each player
     const endDate = effectiveEndDate(season);
     const players = [];
@@ -702,6 +714,7 @@ app.get('/api/leaderboard', authenticate, async (req, res) => {
         points: totalPoints,
         current_streak,
         level: getLevelInfo(totalPoints),
+        latest_badge_emoji: latestBadgeMap[player.id] || null,
       });
     }
 
@@ -789,7 +802,39 @@ app.get('/api/admin/players', authenticate, requireCoach, async (req, res) => {
        WHERE role = 'player'
        ORDER BY last_name ASC`
     );
-    res.json({ players: result.rows });
+
+    // Get latest badge emoji for each player
+    const latestBadgesResult = await pool.query(
+      `SELECT DISTINCT ON (ub.user_id) ub.user_id, b.icon_emoji
+       FROM user_badges ub
+       JOIN badges b ON b.id = ub.badge_id
+       ORDER BY ub.user_id, ub.earned_at DESC`
+    );
+    const latestBadgeMap = {};
+    for (const row of latestBadgesResult.rows) {
+      latestBadgeMap[row.user_id] = row.icon_emoji;
+    }
+
+    // Get active season for level calculation
+    const seasonResult = await pool.query('SELECT * FROM seasons WHERE active = true LIMIT 1');
+    const season = seasonResult.rows[0] || null;
+
+    const players = [];
+    for (const player of result.rows) {
+      let level = getLevelInfo(0);
+      if (season) {
+        const endDate = effectiveEndDate(season);
+        const { totalPoints } = await calculatePlayerPoints(player.id, season.start_date, endDate);
+        level = getLevelInfo(totalPoints);
+      }
+      players.push({
+        ...player,
+        level,
+        latest_badge_emoji: latestBadgeMap[player.id] || null,
+      });
+    }
+
+    res.json({ players });
   } catch (err) {
     console.error('List players error:', err);
     res.status(500).json({ error: 'Server error' });
