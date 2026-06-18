@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fusion-fc-v1';
+const CACHE_NAME = 'daily-reps-v1';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

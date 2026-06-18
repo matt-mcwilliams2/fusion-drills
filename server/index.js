@@ -1745,6 +1745,6 @@ const PORT = process.env.PORT || 3001;
 
 initDatabase().then(() => {
   app.listen(PORT, () => {
-    console.log(`Fusion FC Training server running on port ${PORT}`);
+    console.log(`Daily Reps Training server running on port ${PORT}`);
   });
 });

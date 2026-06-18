@@ -2,7 +2,7 @@ import React from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = 'https://cdn3.sportngin.com/attachments/logo_graphic/d91e-173552562/Fusion_Badgex2_medium.png';
+const LOGO = '/icon.png';
 
 export default function PlayerLayout() {
   const { logout } = useAuth();
@@ -11,8 +11,8 @@ export default function PlayerLayout() {
     <div className="app-layout">
       <header className="header">
         <div className="header-left">
-          <img src={LOGO} alt="Fusion FC" className="header-logo" />
-          <div className="header-title"><span>Fusion FC</span> Training</div>
+          <img src={LOGO} alt="Daily Reps" className="header-logo" />
+          <div className="header-title"><span>Daily Reps</span> Training</div>
         </div>
         <button className="header-logout" onClick={logout}>Log out</button>
       </header>

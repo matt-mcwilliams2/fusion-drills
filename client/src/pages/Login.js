@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = 'https://cdn3.sportngin.com/attachments/logo_graphic/d91e-173552562/Fusion_Badgex2_medium.png';
+const LOGO = '/icon.png';
 
 export default function Login() {
   const { login } = useAuth();
@@ -25,9 +25,9 @@ export default function Login() {
 
   return (
     <div className="login-page">
-      <img src={LOGO} alt="Fusion FC" className="login-logo" />
+      <img src={LOGO} alt="Daily Reps" className="login-logo" />
       <h1 className="login-title">
-        <span>Fusion FC</span> Training
+        <span>Daily Reps</span> Training
       </h1>
       <form className="login-form" onSubmit={handleSubmit}>
         {error && <div className="login-error">{error}</div>}
