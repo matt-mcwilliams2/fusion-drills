@@ -797,24 +797,33 @@ app.post('/api/drills/questions/:questionId/answer', authenticate, async (req, r
       );
 
       const selectedIds = new Set(selected_option_ids || []);
-      let pointsEarned = 0;
+      let correctSelected = 0;
+      let wrongSelected = 0;
       const optionResults = [];
 
       for (const opt of optionsResult.rows) {
         const wasSelected = selectedIds.has(opt.id);
         const isCorrect = opt.is_correct;
-        let earned = 0;
         if (wasSelected && isCorrect) {
-          earned = question.point_value;
-          pointsEarned += earned;
+          correctSelected++;
+        } else if (wasSelected && !isCorrect) {
+          wrongSelected++;
         }
         optionResults.push({
           id: opt.id,
           option_text: opt.option_text,
           is_correct: isCorrect,
           was_selected: wasSelected,
-          points_earned: earned,
         });
+      }
+
+      // Each wrong selection cancels out one correct selection
+      const netCorrect = Math.max(0, correctSelected - wrongSelected);
+      const pointsEarned = netCorrect * question.point_value;
+
+      // Assign per-option points_earned for display
+      for (const opt of optionResults) {
+        opt.points_earned = (opt.was_selected && opt.is_correct && netCorrect > 0) ? question.point_value : 0;
       }
 
       // Store response
