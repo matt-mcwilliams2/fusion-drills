@@ -796,13 +796,13 @@ app.post('/api/drills/questions/:questionId/answer', authenticate, async (req, r
         [questionId]
       );
 
-      const selectedIds = new Set(selected_option_ids || []);
+      const selectedIds = new Set((selected_option_ids || []).map(id => parseInt(id, 10)));
       let correctSelected = 0;
       let wrongSelected = 0;
       const optionResults = [];
 
       for (const opt of optionsResult.rows) {
-        const wasSelected = selectedIds.has(opt.id);
+        const wasSelected = selectedIds.has(parseInt(opt.id, 10));
         const isCorrect = opt.is_correct;
         if (wasSelected && isCorrect) {
           correctSelected++;
