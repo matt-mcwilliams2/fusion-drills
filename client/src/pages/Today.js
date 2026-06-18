@@ -219,6 +219,10 @@ export default function Today() {
         const updated = [...quizQuestions];
         updated[quizIndex] = { ...updated[quizIndex], is_retry: true };
         setQuizQuestions(updated);
+        // Clear feedback after a short delay so inputs reappear
+        setTimeout(() => {
+          setQuizFeedback(null);
+        }, 1500);
         setQuizSubmitting(false);
         return;
       } else {
