@@ -267,6 +267,17 @@ async function calculatePlayerPoints(userId, seasonStartDate, seasonEndDate) {
     }
   }
 
+  // Add question bonus points
+  const questionPointsResult = await pool.query(
+    `SELECT COALESCE(SUM(pqr.points_earned), 0) as question_points
+     FROM player_question_responses pqr
+     JOIN drill_questions dq ON dq.id = pqr.question_id
+     JOIN drills d ON d.id = dq.drill_id
+     WHERE pqr.user_id = $1 AND d.date BETWEEN $2 AND $3 AND d.date <= CURRENT_DATE`,
+    [userId, seasonStartDate, seasonEndDate]
+  );
+  totalPoints += parseInt(questionPointsResult.rows[0].question_points, 10);
+
   return { totalPoints, totalCompletions, extraCount };
 }
 
@@ -503,6 +514,13 @@ app.get('/api/drills/today', authenticate, async (req, res) => {
     }
 
     const row = result.rows[0];
+
+    // Check if drill has questions
+    const qCount = await pool.query(
+      'SELECT COUNT(*) as cnt FROM drill_questions WHERE drill_id = $1',
+      [row.id]
+    );
+
     const drill = {
       id: row.id,
       date: row.date,
@@ -513,6 +531,7 @@ app.get('/api/drills/today', authenticate, async (req, res) => {
       is_challenge: row.is_challenge,
       created_by: row.created_by,
       created_at: row.created_at,
+      has_questions: parseInt(qCount.rows[0].cnt, 10) > 0,
     };
 
     const completion = row.completion_id
@@ -555,6 +574,13 @@ app.get('/api/drills/date/:date', authenticate, async (req, res) => {
     }
 
     const row = result.rows[0];
+
+    // Check if drill has questions
+    const qCount = await pool.query(
+      'SELECT COUNT(*) as cnt FROM drill_questions WHERE drill_id = $1',
+      [row.id]
+    );
+
     const drill = {
       id: row.id,
       date: row.date,
@@ -565,6 +591,7 @@ app.get('/api/drills/date/:date', authenticate, async (req, res) => {
       is_challenge: row.is_challenge,
       created_by: row.created_by,
       created_at: row.created_at,
+      has_questions: parseInt(qCount.rows[0].cnt, 10) > 0,
     };
 
     const completion = row.completion_id
@@ -661,6 +688,227 @@ app.post('/api/drills/:id/complete', authenticate, async (req, res) => {
     res.json({ completion: result.rows[0], newBadges, levelUp, level });
   } catch (err) {
     console.error('Complete drill error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// PLAYER QUESTION ENDPOINTS
+// ============================================================
+
+// GET /api/drills/:id/questions - Get questions for a drill (player-facing, no correct answers)
+app.get('/api/drills/:id/questions', authenticate, async (req, res) => {
+  try {
+    const drillId = parseInt(req.params.id, 10);
+    const userId = req.user.id;
+
+    const questions = await pool.query(
+      'SELECT id, question_text, input_type, point_value, sort_order FROM drill_questions WHERE drill_id = $1 ORDER BY sort_order ASC',
+      [drillId]
+    );
+
+    const result = [];
+    for (const q of questions.rows) {
+      // Check if player already answered this question (has any response)
+      const responded = await pool.query(
+        'SELECT id FROM player_question_responses WHERE user_id = $1 AND question_id = $2 ORDER BY attempt_number DESC LIMIT 1',
+        [userId, q.id]
+      );
+
+      // For text/radio: check if they used both attempts or got it right
+      // For checkbox: check if they have any response (one attempt only)
+      let answered = false;
+      if (responded.rows.length > 0) {
+        if (q.input_type === 'checkbox') {
+          answered = true;
+        } else {
+          // Check if they got it right on attempt 1, or already used attempt 2
+          const attempts = await pool.query(
+            'SELECT attempt_number, points_earned FROM player_question_responses WHERE user_id = $1 AND question_id = $2 ORDER BY attempt_number ASC',
+            [userId, q.id]
+          );
+          if (attempts.rows.length >= 2) {
+            answered = true; // Used both attempts
+          } else if (attempts.rows.length === 1 && attempts.rows[0].points_earned > 0) {
+            answered = true; // Got it right on first try
+          }
+          // If they have 1 attempt with 0 points, they still need a second try
+        }
+      }
+
+      if (!answered) {
+        const questionData = { ...q, options: [] };
+        if (q.input_type === 'radio' || q.input_type === 'checkbox') {
+          const opts = await pool.query(
+            'SELECT id, option_text, sort_order FROM question_options WHERE question_id = $1 ORDER BY sort_order ASC',
+            [q.id]
+          );
+          questionData.options = opts.rows;
+        }
+        // Check if this is a retry (text/radio with 1 failed attempt)
+        if (responded.rows.length > 0) {
+          questionData.is_retry = true;
+        }
+        result.push(questionData);
+      }
+    }
+
+    res.json({
+      questions: result,
+      total_count: questions.rows.length,
+      remaining_count: result.length,
+    });
+  } catch (err) {
+    console.error('Get player questions error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/drills/questions/:questionId/answer - Submit an answer
+app.post('/api/drills/questions/:questionId/answer', authenticate, async (req, res) => {
+  try {
+    const questionId = parseInt(req.params.questionId, 10);
+    const userId = req.user.id;
+    const { answer, selected_option_ids } = req.body;
+
+    // Get the question
+    const qResult = await pool.query('SELECT * FROM drill_questions WHERE id = $1', [questionId]);
+    if (qResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+    const question = qResult.rows[0];
+
+    // Check existing attempts
+    const existingAttempts = await pool.query(
+      'SELECT * FROM player_question_responses WHERE user_id = $1 AND question_id = $2 ORDER BY attempt_number ASC',
+      [userId, questionId]
+    );
+
+    if (question.input_type === 'checkbox') {
+      // Checkbox: one attempt only
+      if (existingAttempts.rows.length > 0) {
+        return res.status(400).json({ error: 'Already answered this question' });
+      }
+
+      // Get correct options
+      const optionsResult = await pool.query(
+        'SELECT * FROM question_options WHERE question_id = $1 ORDER BY sort_order ASC',
+        [questionId]
+      );
+
+      const selectedIds = new Set(selected_option_ids || []);
+      let pointsEarned = 0;
+      const optionResults = [];
+
+      for (const opt of optionsResult.rows) {
+        const wasSelected = selectedIds.has(opt.id);
+        const isCorrect = opt.is_correct;
+        let earned = 0;
+        if (wasSelected && isCorrect) {
+          earned = question.point_value;
+          pointsEarned += earned;
+        }
+        optionResults.push({
+          id: opt.id,
+          option_text: opt.option_text,
+          is_correct: isCorrect,
+          was_selected: wasSelected,
+          points_earned: earned,
+        });
+      }
+
+      // Store response
+      await pool.query(
+        `INSERT INTO player_question_responses (user_id, question_id, response_text, points_earned, attempt_number)
+         VALUES ($1, $2, $3, $4, 1)`,
+        [userId, questionId, JSON.stringify(selected_option_ids), pointsEarned]
+      );
+
+      return res.json({
+        correct: null, // checkbox doesn't have simple correct/wrong
+        points_earned: pointsEarned,
+        option_results: optionResults,
+        attempts_used: 1,
+      });
+    }
+
+    // Text or Radio: up to 2 attempts
+    const attemptNumber = existingAttempts.rows.length + 1;
+    if (attemptNumber > 2) {
+      return res.status(400).json({ error: 'Already used all attempts' });
+    }
+    // Also block if they already got it right
+    if (existingAttempts.rows.length === 1 && existingAttempts.rows[0].points_earned > 0) {
+      return res.status(400).json({ error: 'Already answered correctly' });
+    }
+
+    let isCorrect = false;
+
+    if (question.input_type === 'text') {
+      // Text: compare against acceptable answers (case-insensitive, trim)
+      const acceptableResult = await pool.query(
+        'SELECT answer_text FROM question_acceptable_answers WHERE question_id = $1',
+        [questionId]
+      );
+      const normalizedAnswer = (answer || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      isCorrect = acceptableResult.rows.some(
+        a => a.answer_text.trim().toLowerCase().replace(/\s+/g, ' ') === normalizedAnswer
+      );
+    } else if (question.input_type === 'radio') {
+      // Radio: check if selected option is correct
+      if (selected_option_ids && selected_option_ids.length === 1) {
+        const optCheck = await pool.query(
+          'SELECT is_correct FROM question_options WHERE id = $1 AND question_id = $2',
+          [selected_option_ids[0], questionId]
+        );
+        isCorrect = optCheck.rows.length > 0 && optCheck.rows[0].is_correct;
+      }
+    }
+
+    let pointsEarned = 0;
+    if (isCorrect) {
+      pointsEarned = attemptNumber === 1
+        ? question.point_value
+        : Math.floor(question.point_value / 2);
+    }
+
+    // Store response
+    await pool.query(
+      `INSERT INTO player_question_responses (user_id, question_id, response_text, points_earned, attempt_number)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, questionId, answer || JSON.stringify(selected_option_ids), pointsEarned, attemptNumber]
+    );
+
+    const responseData = {
+      correct: isCorrect,
+      points_earned: pointsEarned,
+      attempts_used: attemptNumber,
+    };
+
+    if (!isCorrect && attemptNumber === 1) {
+      responseData.message = 'Not quite, give it another shot!';
+      responseData.can_retry = true;
+    } else if (!isCorrect && attemptNumber === 2) {
+      // Show correct answer
+      if (question.input_type === 'text') {
+        const acceptableResult = await pool.query(
+          'SELECT answer_text FROM question_acceptable_answers WHERE question_id = $1',
+          [questionId]
+        );
+        responseData.correct_answers = acceptableResult.rows.map(a => a.answer_text);
+      } else if (question.input_type === 'radio') {
+        const correctOpt = await pool.query(
+          'SELECT option_text FROM question_options WHERE question_id = $1 AND is_correct = true',
+          [questionId]
+        );
+        responseData.correct_answers = correctOpt.rows.map(o => o.option_text);
+      }
+      responseData.show_answer = true;
+    }
+
+    res.json(responseData);
+  } catch (err) {
+    console.error('Answer question error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -939,6 +1187,7 @@ app.put('/api/admin/players/:id/reset-password', authenticate, requireCoach, asy
 app.delete('/api/admin/players/:id', authenticate, requireCoach, async (req, res) => {
   try {
     // Delete related data first
+    await pool.query('DELETE FROM player_question_responses WHERE user_id = $1', [req.params.id]);
     await pool.query('DELETE FROM user_badges WHERE user_id = $1', [req.params.id]);
     await pool.query('DELETE FROM completions WHERE user_id = $1', [req.params.id]);
 
@@ -1051,6 +1300,139 @@ app.delete('/api/admin/drills/:id', authenticate, requireCoach, async (req, res)
   } catch (err) {
     console.error('Delete drill error:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// --- Drill Questions ---
+
+// GET /api/admin/drills/:id/questions
+app.get('/api/admin/drills/:id/questions', authenticate, requireCoach, async (req, res) => {
+  try {
+    const drillId = parseInt(req.params.id, 10);
+    const questions = await pool.query(
+      'SELECT * FROM drill_questions WHERE drill_id = $1 ORDER BY sort_order ASC',
+      [drillId]
+    );
+
+    const result = [];
+    for (const q of questions.rows) {
+      const questionData = { ...q, options: [], acceptable_answers: [] };
+      if (q.input_type === 'radio' || q.input_type === 'checkbox') {
+        const opts = await pool.query(
+          'SELECT * FROM question_options WHERE question_id = $1 ORDER BY sort_order ASC',
+          [q.id]
+        );
+        questionData.options = opts.rows;
+      } else if (q.input_type === 'text') {
+        const answers = await pool.query(
+          'SELECT * FROM question_acceptable_answers WHERE question_id = $1',
+          [q.id]
+        );
+        questionData.acceptable_answers = answers.rows;
+      }
+      result.push(questionData);
+    }
+
+    res.json({ questions: result });
+  } catch (err) {
+    console.error('Get drill questions error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/admin/drills/:id/questions
+app.put('/api/admin/drills/:id/questions', authenticate, requireCoach, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const drillId = parseInt(req.params.id, 10);
+    const { questions } = req.body;
+
+    if (!Array.isArray(questions)) {
+      return res.status(400).json({ error: 'Questions must be an array' });
+    }
+    if (questions.length > 20) {
+      return res.status(400).json({ error: 'Maximum 20 questions per drill' });
+    }
+
+    await client.query('BEGIN');
+
+    // Get existing question IDs for this drill
+    const existing = await client.query(
+      'SELECT id FROM drill_questions WHERE drill_id = $1',
+      [drillId]
+    );
+    const existingIds = new Set(existing.rows.map(r => r.id));
+    const incomingIds = new Set(questions.filter(q => q.id).map(q => q.id));
+
+    // Delete questions that were removed by the coach
+    for (const existId of existingIds) {
+      if (!incomingIds.has(existId)) {
+        await client.query('DELETE FROM drill_questions WHERE id = $1', [existId]);
+      }
+    }
+
+    // Upsert questions
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      let questionId;
+
+      if (q.id && existingIds.has(q.id)) {
+        // Update existing question
+        await client.query(
+          `UPDATE drill_questions SET question_text = $1, input_type = $2, point_value = $3, sort_order = $4
+           WHERE id = $5`,
+          [q.question_text, q.input_type, parseInt(q.point_value, 10) || 1, i, q.id]
+        );
+        questionId = q.id;
+      } else {
+        // Insert new question
+        const insertResult = await client.query(
+          `INSERT INTO drill_questions (drill_id, question_text, input_type, point_value, sort_order)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          [drillId, q.question_text, q.input_type, parseInt(q.point_value, 10) || 1, i]
+        );
+        questionId = insertResult.rows[0].id;
+      }
+
+      // Replace options for radio/checkbox
+      if (q.input_type === 'radio' || q.input_type === 'checkbox') {
+        await client.query('DELETE FROM question_options WHERE question_id = $1', [questionId]);
+        if (q.options && q.options.length > 0) {
+          for (let j = 0; j < q.options.length; j++) {
+            const opt = q.options[j];
+            await client.query(
+              `INSERT INTO question_options (question_id, option_text, is_correct, sort_order)
+               VALUES ($1, $2, $3, $4)`,
+              [questionId, opt.option_text, opt.is_correct || false, j]
+            );
+          }
+        }
+      }
+
+      // Replace acceptable answers for text
+      if (q.input_type === 'text') {
+        await client.query('DELETE FROM question_acceptable_answers WHERE question_id = $1', [questionId]);
+        if (q.acceptable_answers && q.acceptable_answers.length > 0) {
+          for (const ans of q.acceptable_answers) {
+            const ansText = typeof ans === 'string' ? ans : ans.answer_text;
+            await client.query(
+              `INSERT INTO question_acceptable_answers (question_id, answer_text)
+               VALUES ($1, $2)`,
+              [questionId, ansText]
+            );
+          }
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ message: 'Questions saved' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Save drill questions error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -1257,6 +1639,52 @@ async function runMigrations() {
     await pool.query(`DELETE FROM badges WHERE slug = 'extra-effort-5'`);
     // Update weekly-winner description if stale
     await pool.query(`UPDATE badges SET description = 'Most points in a completed week' WHERE slug = 'weekly-winner'`);
+
+    // Create quiz/questions tables if they don't exist
+    const dqTable = await pool.query(
+      "SELECT 1 FROM information_schema.tables WHERE table_name = 'drill_questions'"
+    );
+    if (dqTable.rows.length === 0) {
+      await pool.query(`
+        CREATE TABLE drill_questions (
+          id SERIAL PRIMARY KEY,
+          drill_id INTEGER REFERENCES drills(id) ON DELETE CASCADE NOT NULL,
+          question_text TEXT NOT NULL,
+          input_type VARCHAR(20) NOT NULL CHECK (input_type IN ('text', 'radio', 'checkbox')),
+          point_value INTEGER NOT NULL DEFAULT 1,
+          sort_order INTEGER NOT NULL DEFAULT 0
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE question_options (
+          id SERIAL PRIMARY KEY,
+          question_id INTEGER REFERENCES drill_questions(id) ON DELETE CASCADE NOT NULL,
+          option_text VARCHAR(500) NOT NULL,
+          is_correct BOOLEAN DEFAULT false,
+          sort_order INTEGER NOT NULL DEFAULT 0
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE question_acceptable_answers (
+          id SERIAL PRIMARY KEY,
+          question_id INTEGER REFERENCES drill_questions(id) ON DELETE CASCADE NOT NULL,
+          answer_text VARCHAR(500) NOT NULL
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE player_question_responses (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+          question_id INTEGER REFERENCES drill_questions(id) ON DELETE CASCADE NOT NULL,
+          response_text TEXT,
+          points_earned INTEGER NOT NULL DEFAULT 0,
+          attempt_number INTEGER NOT NULL DEFAULT 1,
+          answered_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(user_id, question_id, attempt_number)
+        )
+      `);
+      console.log('Migration: created quiz/questions tables.');
+    }
   } catch (err) {
     console.error('Migration error:', err);
   }

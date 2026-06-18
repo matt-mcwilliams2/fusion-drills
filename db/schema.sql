@@ -74,3 +74,41 @@ CREATE TABLE seasons (
     active BOOLEAN DEFAULT false,
     created_by INTEGER REFERENCES users(id)
 );
+
+-- Drill questions table: quiz questions attached to drills
+CREATE TABLE drill_questions (
+    id SERIAL PRIMARY KEY,
+    drill_id INTEGER REFERENCES drills(id) ON DELETE CASCADE NOT NULL,
+    question_text TEXT NOT NULL,
+    input_type VARCHAR(20) NOT NULL CHECK (input_type IN ('text', 'radio', 'checkbox')),
+    point_value INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+-- Question options table: answer choices for radio/checkbox questions
+CREATE TABLE question_options (
+    id SERIAL PRIMARY KEY,
+    question_id INTEGER REFERENCES drill_questions(id) ON DELETE CASCADE NOT NULL,
+    option_text VARCHAR(500) NOT NULL,
+    is_correct BOOLEAN DEFAULT false,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+-- Question acceptable answers table: valid answers for text box questions
+CREATE TABLE question_acceptable_answers (
+    id SERIAL PRIMARY KEY,
+    question_id INTEGER REFERENCES drill_questions(id) ON DELETE CASCADE NOT NULL,
+    answer_text VARCHAR(500) NOT NULL
+);
+
+-- Player question responses table: tracks player answers and points earned
+CREATE TABLE player_question_responses (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    question_id INTEGER REFERENCES drill_questions(id) ON DELETE CASCADE NOT NULL,
+    response_text TEXT,
+    points_earned INTEGER NOT NULL DEFAULT 0,
+    attempt_number INTEGER NOT NULL DEFAULT 1,
+    answered_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, question_id, attempt_number)
+);
