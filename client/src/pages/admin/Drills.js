@@ -7,6 +7,7 @@ const emptyQuestion = () => ({
   point_value: '1',
   options: [],
   acceptable_answers: [],
+  min_char_count: null,
 });
 
 export default function Drills() {
@@ -53,6 +54,7 @@ export default function Drills() {
           point_value: String(q.point_value),
           options: q.options || [],
           acceptable_answers: q.acceptable_answers || [],
+          min_char_count: q.min_char_count || null,
         })));
       } else {
         setHasQuestions(false);
@@ -282,18 +284,37 @@ export default function Drills() {
                         </div>
                       </div>
 
-                      {/* Text Box: Acceptable Answers */}
+                      {/* Text Box: Acceptable Answers or Min Char Count */}
                       {q.input_type === 'text' && (
                         <div className="question-answers-section">
-                          <label className="form-label">Acceptable Answers</label>
-                          <div className="question-warning">Add every reasonable variation you would accept. Players must match one of your answers exactly (case-insensitive, extra spaces ignored).</div>
-                          {q.acceptable_answers.map((a, ai) => (
-                            <div key={ai} className="option-row">
-                              <input className="form-input" value={a.answer_text} onChange={(e) => updateAcceptableAnswer(qi, ai, e.target.value)} placeholder="Acceptable answer..." />
-                              <button type="button" className="btn-remove-sm" onClick={() => removeAcceptableAnswer(qi, ai)}>x</button>
+                          <label className="form-checkbox" style={{ marginBottom: 8 }}>
+                            <input type="checkbox" checked={q.min_char_count != null} onChange={(e) => {
+                              if (e.target.checked) {
+                                updateQuestion(qi, 'min_char_count', 50);
+                              } else {
+                                updateQuestion(qi, 'min_char_count', null);
+                              }
+                            }} />
+                            <span>Allow any answer with a minimum character count</span>
+                          </label>
+                          {q.min_char_count != null ? (
+                            <div className="form-group" style={{ marginTop: 4 }}>
+                              <label className="form-label">Minimum Characters</label>
+                              <input className="form-input" type="number" min="1" value={q.min_char_count} onChange={(e) => updateQuestion(qi, 'min_char_count', parseInt(e.target.value, 10) || 1)} style={{ width: 120 }} />
                             </div>
-                          ))}
-                          <button type="button" className="btn btn-outline btn-sm add-option-btn" onClick={() => addAcceptableAnswer(qi)}>+ Add Answer</button>
+                          ) : (
+                            <>
+                              <label className="form-label">Acceptable Answers</label>
+                              <div className="question-warning">Add every reasonable variation you would accept. Players must match one of your answers exactly (case-insensitive, extra spaces ignored).</div>
+                              {q.acceptable_answers.map((a, ai) => (
+                                <div key={ai} className="option-row">
+                                  <input className="form-input" value={a.answer_text} onChange={(e) => updateAcceptableAnswer(qi, ai, e.target.value)} placeholder="Acceptable answer..." />
+                                  <button type="button" className="btn-remove-sm" onClick={() => removeAcceptableAnswer(qi, ai)}>x</button>
+                                </div>
+                              ))}
+                              <button type="button" className="btn btn-outline btn-sm add-option-btn" onClick={() => addAcceptableAnswer(qi)}>+ Add Answer</button>
+                            </>
+                          )}
                         </div>
                       )}
 

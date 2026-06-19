@@ -854,15 +854,20 @@ app.post('/api/drills/questions/:questionId/answer', authenticate, async (req, r
     let isCorrect = false;
 
     if (question.input_type === 'text') {
-      // Text: compare against acceptable answers (case-insensitive, trim)
-      const acceptableResult = await pool.query(
-        'SELECT answer_text FROM question_acceptable_answers WHERE question_id = $1',
-        [questionId]
-      );
-      const normalizedAnswer = (answer || '').trim().toLowerCase().replace(/\s+/g, ' ');
-      isCorrect = acceptableResult.rows.some(
-        a => a.answer_text.trim().toLowerCase().replace(/\s+/g, ' ') === normalizedAnswer
-      );
+      if (question.min_char_count != null) {
+        // Min char count mode: any answer with enough characters is correct
+        isCorrect = (answer || '').trim().length >= question.min_char_count;
+      } else {
+        // Text: compare against acceptable answers (case-insensitive, trim)
+        const acceptableResult = await pool.query(
+          'SELECT answer_text FROM question_acceptable_answers WHERE question_id = $1',
+          [questionId]
+        );
+        const normalizedAnswer = (answer || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        isCorrect = acceptableResult.rows.some(
+          a => a.answer_text.trim().toLowerCase().replace(/\s+/g, ' ') === normalizedAnswer
+        );
+      }
     } else if (question.input_type === 'radio') {
       // Radio: check if selected option is correct
       if (selected_option_ids && selected_option_ids.length === 1) {
@@ -900,11 +905,15 @@ app.post('/api/drills/questions/:questionId/answer', authenticate, async (req, r
     } else if (!isCorrect && attemptNumber === 2) {
       // Show correct answer
       if (question.input_type === 'text') {
-        const acceptableResult = await pool.query(
-          'SELECT answer_text FROM question_acceptable_answers WHERE question_id = $1',
-          [questionId]
-        );
-        responseData.correct_answers = acceptableResult.rows.map(a => a.answer_text);
+        if (question.min_char_count != null) {
+          responseData.correct_answers = [`Answer must be at least ${question.min_char_count} characters`];
+        } else {
+          const acceptableResult = await pool.query(
+            'SELECT answer_text FROM question_acceptable_answers WHERE question_id = $1',
+            [questionId]
+          );
+          responseData.correct_answers = acceptableResult.rows.map(a => a.answer_text);
+        }
       } else if (question.input_type === 'radio') {
         const correctOpt = await pool.query(
           'SELECT option_text FROM question_options WHERE question_id = $1 AND is_correct = true',
@@ -1388,17 +1397,17 @@ app.put('/api/admin/drills/:id/questions', authenticate, requireCoach, async (re
       if (q.id && existingIds.has(q.id)) {
         // Update existing question
         await client.query(
-          `UPDATE drill_questions SET question_text = $1, input_type = $2, point_value = $3, sort_order = $4
-           WHERE id = $5`,
-          [q.question_text, q.input_type, parseInt(q.point_value, 10) || 1, i, q.id]
+          `UPDATE drill_questions SET question_text = $1, input_type = $2, point_value = $3, sort_order = $4, min_char_count = $5
+           WHERE id = $6`,
+          [q.question_text, q.input_type, parseInt(q.point_value, 10) || 1, i, q.min_char_count != null ? parseInt(q.min_char_count, 10) : null, q.id]
         );
         questionId = q.id;
       } else {
         // Insert new question
         const insertResult = await client.query(
-          `INSERT INTO drill_questions (drill_id, question_text, input_type, point_value, sort_order)
-           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-          [drillId, q.question_text, q.input_type, parseInt(q.point_value, 10) || 1, i]
+          `INSERT INTO drill_questions (drill_id, question_text, input_type, point_value, sort_order, min_char_count)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [drillId, q.question_text, q.input_type, parseInt(q.point_value, 10) || 1, i, q.min_char_count != null ? parseInt(q.min_char_count, 10) : null]
         );
         questionId = insertResult.rows[0].id;
       }
@@ -1693,6 +1702,15 @@ async function runMigrations() {
         )
       `);
       console.log('Migration: created quiz/questions tables.');
+    }
+
+    // Add min_char_count column to drill_questions if it doesn't exist
+    const mccCol = await pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'drill_questions' AND column_name = 'min_char_count'"
+    );
+    if (mccCol.rows.length === 0) {
+      await pool.query('ALTER TABLE drill_questions ADD COLUMN min_char_count INTEGER');
+      console.log('Migration: added min_char_count column to drill_questions.');
     }
   } catch (err) {
     console.error('Migration error:', err);
