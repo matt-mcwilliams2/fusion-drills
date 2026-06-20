@@ -2,7 +2,7 @@ import React from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = '/daily-reps.png';
+const LOGO = '/dailyreps3.png';
 
 export default function AdminLayout() {
   const { logout, teams, activeTeamId, activeTeam, setActiveTeam } = useAuth();

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = '/daily-reps.png';
+const LOGO = '/dailyreps3.png';
 const API_BASE = process.env.REACT_APP_API_URL || '';
 
 export default function PlayerLogin() {

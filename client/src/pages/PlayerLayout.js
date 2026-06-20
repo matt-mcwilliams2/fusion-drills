@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { Outlet, NavLink, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = '/daily-reps.png';
+const LOGO = '/dailyreps3.png';
 
 export default function PlayerLayout() {
   const { logout, teamInfo } = useAuth();

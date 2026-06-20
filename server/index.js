@@ -1849,8 +1849,8 @@ app.get('/t/:joinCode/manifest.json', async (req, res) => {
       short_name: 'Daily Reps',
       name: `Daily Reps - ${teamName}`,
       icons: [
-        { src: '/daily-reps.png', type: 'image/png', sizes: '192x192' },
-        { src: '/daily-reps.png', type: 'image/png', sizes: '512x512' },
+        { src: '/dailyreps3.png', type: 'image/png', sizes: '192x192' },
+        { src: '/dailyreps3.png', type: 'image/png', sizes: '512x512' },
       ],
       start_url: `/t/${req.params.joinCode.toUpperCase().trim()}`,
       display: 'standalone',
@@ -1865,8 +1865,8 @@ app.get('/t/:joinCode/manifest.json', async (req, res) => {
       short_name: 'Daily Reps',
       name: 'Daily Reps Training',
       icons: [
-        { src: '/daily-reps.png', type: 'image/png', sizes: '192x192' },
-        { src: '/daily-reps.png', type: 'image/png', sizes: '512x512' },
+        { src: '/dailyreps3.png', type: 'image/png', sizes: '192x192' },
+        { src: '/dailyreps3.png', type: 'image/png', sizes: '512x512' },
       ],
       start_url: '/',
       display: 'standalone',

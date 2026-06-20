@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = '/daily-reps.png';
+const LOGO = '/dailyreps3.png';
 
 export default function ClubAdmin() {
   const { user, logout } = useAuth();
