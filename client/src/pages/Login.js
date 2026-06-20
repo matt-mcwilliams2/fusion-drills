@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 
-const LOGO = '/icon.png';
+const LOGO = '/daily-reps.png';
 
 export default function Login() {
-  const { login } = useAuth();
-  const [username, setUsername] = useState('');
+  const { loginStaff } = useAuth();
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -15,7 +15,7 @@ export default function Login() {
     setError('');
     setLoading(true);
     try {
-      await login(username, password);
+      await loginStaff(email, password);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -27,15 +27,15 @@ export default function Login() {
     <div className="login-page">
       <img src={LOGO} alt="Daily Reps" className="login-logo" />
       <h1 className="login-title">
-        <span>Daily Reps</span> Training
+        <span>Daily Reps</span> Coach Login
       </h1>
       <form className="login-form" onSubmit={handleSubmit}>
         {error && <div className="login-error">{error}</div>}
         <input
-          type="text"
-          placeholder="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          type="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
           autoCapitalize="none"
           autoCorrect="off"
           required

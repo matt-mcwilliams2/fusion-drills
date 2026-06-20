@@ -1,8 +1,9 @@
-const CACHE_NAME = 'daily-reps-v1';
+const CACHE_NAME = 'daily-reps-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/daily-reps.png',
 ];
 
 self.addEventListener('install', (event) => {
@@ -36,7 +37,13 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // For navigation requests, network first then cache
+  // For dynamic manifest requests, network only
+  if (event.request.url.includes('/manifest.json') && event.request.url.includes('/t/')) {
+    event.respondWith(fetch(event.request).catch(() => caches.match('/manifest.json')));
+    return;
+  }
+
+  // For navigation requests (including /t/* routes), network first then cache
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request).catch(() => caches.match('/index.html'))

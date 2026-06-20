@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 
 export default function InviteCoach() {
   const { apiFetch } = useAuth();
-  const [form, setForm] = useState({ first_name: '', last_name: '', username: '', password: '' });
+  const [form, setForm] = useState({ first_name: '', last_name: '', email: '', password: '' });
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState('');
 
@@ -17,7 +17,7 @@ export default function InviteCoach() {
         body: JSON.stringify(form),
       });
       setSuccess(`Coach ${data.coach.first_name} ${data.coach.last_name} has been added.`);
-      setForm({ first_name: '', last_name: '', username: '', password: '' });
+      setForm({ first_name: '', last_name: '', email: '', password: '' });
     } catch (err) { alert(err.message); }
     finally { setSaving(false); }
   };
@@ -37,8 +37,8 @@ export default function InviteCoach() {
             <input className="form-input" value={form.last_name} onChange={(e) => setForm({...form, last_name: e.target.value})} required />
           </div>
           <div className="form-group">
-            <label className="form-label">Username</label>
-            <input className="form-input" value={form.username} onChange={(e) => setForm({...form, username: e.target.value})} autoCapitalize="none" required />
+            <label className="form-label">Email</label>
+            <input className="form-input" type="email" value={form.email} onChange={(e) => setForm({...form, email: e.target.value})} autoCapitalize="none" required />
           </div>
           <div className="form-group">
             <label className="form-label">Password</label>

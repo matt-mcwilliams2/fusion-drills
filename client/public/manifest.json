@@ -3,12 +3,12 @@
   "name": "Daily Reps Training",
   "icons": [
     {
-      "src": "icon.png",
+      "src": "daily-reps.png",
       "type": "image/png",
       "sizes": "192x192"
     },
     {
-      "src": "icon.png",
+      "src": "daily-reps.png",
       "type": "image/png",
       "sizes": "512x512"
     }
