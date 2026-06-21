@@ -5135,8 +5135,10 @@ async function initDatabase() {
       console.log('New multi-tenant schema already exists, skipping migration.');
       // Ensure badges and levels are seeded
       await seedBadges();
+      await seedLevels();
       await runBuild2Migrations();
       await runBuild3Migrations();
+      await runBuild4Migrations();
       await seedAppSettings();
       return;
     }
