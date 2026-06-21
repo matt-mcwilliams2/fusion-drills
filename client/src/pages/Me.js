@@ -45,7 +45,7 @@ export default function Me() {
 
       {level && (
         <div className="level-section">
-          <LevelShield name={level.name} color={level.color} textColor={level.textColor} size="large" />
+          <LevelShield name={level.name} color={level.color} textColor={level.textColor} isPrestige={level.isPrestige} subtitle={level.subtitle} size="large" />
           <div className="level-info">
             <div className="level-label">Level</div>
             <div className="level-name">{level.name}</div>
@@ -71,7 +71,17 @@ export default function Me() {
         </div>
         <div className="stat-card">
           <div className="stat-value">{stats?.total_points || 0}</div>
-          <div className="stat-label">Total Points</div>
+          <div className="stat-label">Season Points</div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 12, padding: '14px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 2 }}>Career Total</div>
+          <div style={{ fontSize: '1.3rem', fontWeight: 800, color: 'var(--orange)' }}>{stats?.lifetime_points || 0}</div>
+        </div>
+        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', maxWidth: 180, textAlign: 'right' }}>
+          All the points you've earned across every season
         </div>
       </div>
 

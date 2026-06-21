@@ -38,19 +38,30 @@ app.use(express.static(path.join(__dirname, '../client/build')));
 // ============================================================
 
 const LEVELS = [
-  { name: 'Neymar',    threshold: 0,    color: '#FFD700', textColor: '#000000' },
-  { name: 'Mbappe',    threshold: 89,   color: '#1348e5', textColor: '#000000' },
-  { name: 'Salah',     threshold: 230,  color: '#C8102E', textColor: '#000000' },
-  { name: 'Yamal',     threshold: 435,  color: '#CD7F32', textColor: '#000000' },
-  { name: 'Guardiola', threshold: 682,  color: '#000000', textColor: '#ffffff' },
-  { name: 'Haaland',   threshold: 901,  color: '#6CABDD', textColor: '#000000' },
-  { name: 'Maradona',  threshold: 1233, color: '#CD7F32', textColor: '#000000' },
-  { name: 'Cruyff',    threshold: 1677, color: '#f77c00', textColor: '#000000' },
-  { name: 'Xavi',      threshold: 2098, color: '#ffffff', textColor: '#C8102E' },
-  { name: 'Zico',      threshold: 2455, color: '#C0C0C0', textColor: '#000000' },
-  { name: 'Pele',      threshold: 2833, color: '#009739', textColor: '#FFD700' },
-  { name: 'Messi',     threshold: 3209, color: '#FF69B4', textColor: '#000000' },
-  { name: 'Ronaldo',   threshold: 3651, color: '#FFD700', textColor: '#000000' },
+  { name: 'Infantil',         threshold: 0,    color: '#0d1b4c', textColor: '#d4af37', isPrestige: false },
+  { name: 'Neymar',           threshold: 89,   color: '#ffd400', textColor: '#000000', isPrestige: false },
+  { name: 'Mbappe',           threshold: 230,  color: '#1348e5', textColor: '#000000', isPrestige: false },
+  { name: 'Salah',            threshold: 394,  color: '#e11d2a', textColor: '#000000', isPrestige: false },
+  { name: 'Yamal',            threshold: 622,  color: '#cd7f32', textColor: '#000000', isPrestige: false },
+  { name: 'Iniesta',          threshold: 841,  color: '#e11d2a', textColor: '#ffd400', isPrestige: false },
+  { name: 'Haaland',          threshold: 1083, color: '#5bb8e8', textColor: '#000000', isPrestige: false },
+  { name: 'Kane',             threshold: 1355, color: '#ffffff', textColor: '#e11d2a', isPrestige: false },
+  { name: 'Maradona',         threshold: 1627, color: '#cd7f32', textColor: '#000000', isPrestige: false },
+  { name: 'Cruyff',           threshold: 1976, color: '#f77c00', textColor: '#000000', isPrestige: false },
+  { name: 'Zlatan',           threshold: 2122, color: '#2f6fed', textColor: '#ffd400', isPrestige: false },
+  { name: 'Xavi',             threshold: 2455, color: '#ffffff', textColor: '#e11d2a', isPrestige: false },
+  { name: 'Zico',             threshold: 2833, color: '#c0c0c0', textColor: '#000000', isPrestige: false },
+  { name: 'Lewandowski',      threshold: 3209, color: '#000000', textColor: '#ffd400', isPrestige: false },
+  { name: 'Beckham',          threshold: 3551, color: '#f06ea9', textColor: '#000000', isPrestige: false },
+  { name: 'Di Stefano',       threshold: 3839, color: '#5bb8e8', textColor: '#b8860b', isPrestige: false },
+  { name: 'Zidane',           threshold: 4203, color: '#e11d2a', textColor: '#5bb8e8', isPrestige: false },
+  { name: 'Pele',             threshold: 4534, color: '#1f9d4d', textColor: '#ffd400', isPrestige: false },
+  { name: 'Messi',            threshold: 4899, color: '#ff4fa3', textColor: '#000000', isPrestige: false },
+  { name: 'Ronaldo',          threshold: 5225, color: '#d4af37', textColor: '#000000', isPrestige: false },
+  { name: 'Ronaldo, Man U',   threshold: 5488, color: '#e11d2a', textColor: '#ffffff', isPrestige: true, subtitle: 'Man U' },
+  { name: 'Ronaldo, Real Madrid', threshold: 5833, color: '#ffd400', textColor: '#2f6fed', isPrestige: true, subtitle: 'Real Madrid' },
+  { name: 'Ronaldo, Juventus', threshold: 6300, color: '#000000', textColor: '#ffffff', isPrestige: true, subtitle: 'Juventus' },
+  { name: 'Ronaldo, National Team', threshold: 6745, color: '#e11d2a', textColor: '#8fe388', isPrestige: true, subtitle: 'National Team' },
 ];
 
 function getLevelInfo(points) {
@@ -63,6 +74,8 @@ function getLevelInfo(points) {
         name: current.name,
         color: current.color,
         textColor: current.textColor,
+        isPrestige: current.isPrestige || false,
+        subtitle: current.subtitle || null,
         nextLevelName: next ? next.name : null,
       };
     }
@@ -71,6 +84,8 @@ function getLevelInfo(points) {
     name: current.name,
     color: current.color,
     textColor: current.textColor,
+    isPrestige: current.isPrestige || false,
+    subtitle: current.subtitle || null,
     nextLevelName: LEVELS[1] ? LEVELS[1].name : null,
   };
 }
@@ -1611,12 +1626,17 @@ app.get('/api/me/stats', authenticate, requireRole('player'), async (req, res) =
     const currentStreak = await calculateCurrentStreak(req.user.id, req.teamId, season.start_date, endDate);
     const longestStreak = await calculateLongestStreak(req.user.id, req.teamId, season.start_date, endDate);
 
+    // Fetch lifetime points
+    const lpResult = await pool.query('SELECT lifetime_points FROM players WHERE id = $1', [req.user.id]);
+    const lifetimePoints = lpResult.rows[0]?.lifetime_points || 0;
+
     res.json({
       current_streak: currentStreak,
       longest_streak: longestStreak,
       total_completions: totalCompletions,
       total_points: totalPoints,
       extra_count: extraCount,
+      lifetime_points: lifetimePoints,
       level: getLevelInfo(totalPoints),
     });
   } catch (err) {
@@ -3216,6 +3236,159 @@ app.post('/api/invitations/:token/accept', async (req, res) => {
 });
 
 // ============================================================
+// COACH REPORTING ENDPOINTS
+// ============================================================
+
+// GET /api/admin/reports - Coach engagement report for team
+app.get('/api/admin/reports', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const teamId = req.teamId;
+    const season = await getActiveSeasonForTeam(teamId);
+    if (!season) {
+      return res.json({ noSeason: true });
+    }
+    const endDate = effectiveEndDate(season);
+
+    // Get all active players on team
+    const playersResult = await pool.query(
+      "SELECT id, first_name, last_name, status FROM players WHERE team_id = $1 AND status = 'active' ORDER BY last_name",
+      [teamId]
+    );
+    const players = playersResult.rows;
+    const playerIds = players.map(p => p.id);
+
+    // Get week boundary (Monday)
+    const now = new Date();
+    const dayOfWeek = now.getUTCDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const weekStart = new Date(now);
+    weekStart.setUTCDate(now.getUTCDate() + mondayOffset);
+    weekStart.setUTCHours(0, 0, 0, 0);
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+
+    // This week: how many players completed at least one drill
+    const thisWeekResult = await pool.query(
+      `SELECT COUNT(DISTINCT c.player_id) as active_count
+       FROM completions c
+       JOIN drills d ON d.id = c.drill_id
+       WHERE d.team_id = $1 AND c.completed_at >= $2 AND c.player_id = ANY($3::uuid[])`,
+      [teamId, weekStartStr, playerIds]
+    );
+    const activeThisWeek = parseInt(thisWeekResult.rows[0]?.active_count || 0, 10);
+
+    // Recent drills with completion counts (last 20 drills)
+    const recentDrillsResult = await pool.query(
+      `SELECT d.id, d.title, d.date,
+              COUNT(c.id) as completion_count
+       FROM drills d
+       LEFT JOIN completions c ON c.drill_id = d.id AND c.player_id = ANY($2::uuid[])
+       WHERE d.team_id = $1 AND d.date <= CURRENT_DATE AND d.date >= $3
+       GROUP BY d.id, d.title, d.date
+       ORDER BY d.date DESC
+       LIMIT 20`,
+      [teamId, playerIds, season.start_date]
+    );
+
+    // Per-player stats
+    const tenDaysAgo = new Date();
+    tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+    const tenDaysAgoStr = tenDaysAgo.toISOString().split('T')[0];
+
+    // Get total drills scheduled since each player joined (or season start)
+    const playerStats = [];
+    for (const player of players) {
+      // Player join date - use created_at or season start, whichever is later
+      const playerStart = new Date(player.created_at || season.start_date) > new Date(season.start_date)
+        ? (player.created_at || season.start_date)
+        : season.start_date;
+
+      // Total drills scheduled for this player since they joined
+      const drillCountResult = await pool.query(
+        `SELECT COUNT(*) as total FROM drills WHERE team_id = $1 AND date BETWEEN $2 AND $3 AND date <= CURRENT_DATE`,
+        [teamId, season.start_date, endDate]
+      );
+      const totalDrills = parseInt(drillCountResult.rows[0]?.total || 0, 10);
+
+      // Completions this season
+      const compResult = await pool.query(
+        `SELECT COUNT(*) as total FROM completions c JOIN drills d ON d.id = c.drill_id
+         WHERE c.player_id = $1 AND d.team_id = $2 AND d.date BETWEEN $3 AND $4`,
+        [player.id, teamId, season.start_date, endDate]
+      );
+      const completions = parseInt(compResult.rows[0]?.total || 0, 10);
+
+      // Last active date
+      const lastActiveResult = await pool.query(
+        `SELECT MAX(c.completed_at) as last_active FROM completions c JOIN drills d ON d.id = c.drill_id
+         WHERE c.player_id = $1 AND d.team_id = $2`,
+        [player.id, teamId]
+      );
+      const lastActive = lastActiveResult.rows[0]?.last_active || null;
+
+      // Current streak
+      const currentStreak = await calculateCurrentStreak(player.id, teamId, season.start_date, endDate);
+
+      const completionRate = totalDrills > 0 ? Math.round((completions / totalDrills) * 100) : 0;
+      const isInactive = !lastActive || new Date(lastActive) < tenDaysAgo;
+
+      playerStats.push({
+        id: player.id,
+        first_name: player.first_name,
+        last_name: player.last_name,
+        last_active: lastActive,
+        current_streak: currentStreak,
+        completions,
+        completion_rate: completionRate,
+        inactive: isInactive,
+      });
+    }
+
+    // Weekly trend: completions per week over last 8 weeks
+    const weeklyTrend = [];
+    for (let w = 7; w >= 0; w--) {
+      const wStart = new Date(now);
+      wStart.setUTCDate(now.getUTCDate() + mondayOffset - (w * 7));
+      wStart.setUTCHours(0, 0, 0, 0);
+      const wEnd = new Date(wStart);
+      wEnd.setUTCDate(wStart.getUTCDate() + 6);
+
+      const wStartStr = wStart.toISOString().split('T')[0];
+      const wEndStr = wEnd.toISOString().split('T')[0];
+
+      const weekResult = await pool.query(
+        `SELECT COUNT(c.id) as completions
+         FROM completions c JOIN drills d ON d.id = c.drill_id
+         WHERE d.team_id = $1 AND d.date BETWEEN $2 AND $3 AND c.player_id = ANY($4::uuid[])`,
+        [teamId, wStartStr, wEndStr, playerIds]
+      );
+
+      weeklyTrend.push({
+        week_start: wStartStr,
+        completions: parseInt(weekResult.rows[0]?.completions || 0, 10),
+      });
+    }
+
+    res.json({
+      season: { id: season.id, name: season.name },
+      total_players: players.length,
+      active_this_week: activeThisWeek,
+      recent_drills: recentDrillsResult.rows.map(d => ({
+        id: d.id,
+        title: d.title,
+        date: d.date,
+        completion_count: parseInt(d.completion_count, 10),
+        total_players: players.length,
+      })),
+      player_stats: playerStats,
+      weekly_trend: weeklyTrend,
+    });
+  } catch (err) {
+    console.error('Coach reports error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
 // CLUB ADMIN ENDPOINTS
 // ============================================================
 
@@ -3276,6 +3449,154 @@ app.get('/api/club/coaches', authenticate, requireRole('club_admin'), requireClu
     res.json({ coaches: result.rows });
   } catch (err) {
     console.error('List club coaches error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Club reporting
+app.get('/api/club/reports', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  try {
+    const clubId = req.clubId;
+
+    // Get all active teams in club
+    const teamsResult = await pool.query(
+      "SELECT id, name FROM teams WHERE club_id = $1 AND status = 'active' ORDER BY name",
+      [clubId]
+    );
+
+    const now = new Date();
+    const dayOfWeek = now.getUTCDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const weekStart = new Date(now);
+    weekStart.setUTCDate(now.getUTCDate() + mondayOffset);
+    weekStart.setUTCHours(0, 0, 0, 0);
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+
+    const tenDaysAgo = new Date();
+    tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+    const tenDaysAgoStr = tenDaysAgo.toISOString().split('T')[0];
+
+    let clubTotalPlayers = 0;
+    let clubActiveThisWeek = 0;
+    let clubTotalCompletions = 0;
+    let clubTotalDrills = 0;
+    const teamStats = [];
+
+    for (const team of teamsResult.rows) {
+      // Active season for this team
+      const seasonResult = await pool.query(
+        "SELECT * FROM seasons WHERE team_id = $1 AND status = 'active' LIMIT 1",
+        [team.id]
+      );
+      const season = seasonResult.rows[0];
+
+      // Player count
+      const playerResult = await pool.query(
+        "SELECT COUNT(*) as total FROM players WHERE team_id = $1 AND status = 'active'",
+        [team.id]
+      );
+      const playerCount = parseInt(playerResult.rows[0]?.total || 0, 10);
+      clubTotalPlayers += playerCount;
+
+      // Players active this week
+      const activeResult = await pool.query(
+        `SELECT COUNT(DISTINCT c.player_id) as active_count
+         FROM completions c JOIN drills d ON d.id = c.drill_id
+         JOIN players p ON p.id = c.player_id
+         WHERE d.team_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
+        [team.id, weekStartStr]
+      );
+      const activeCount = parseInt(activeResult.rows[0]?.active_count || 0, 10);
+      clubActiveThisWeek += activeCount;
+
+      // Completion rate (season drills)
+      let completionRate = 0;
+      let lastActivity = null;
+      if (season) {
+        const endDate = effectiveEndDate(season);
+        const drillsResult = await pool.query(
+          'SELECT COUNT(*) as total FROM drills WHERE team_id = $1 AND date BETWEEN $2 AND $3 AND date <= CURRENT_DATE',
+          [team.id, season.start_date, endDate]
+        );
+        const totalDrills = parseInt(drillsResult.rows[0]?.total || 0, 10);
+        clubTotalDrills += totalDrills * playerCount;
+
+        const compsResult = await pool.query(
+          `SELECT COUNT(c.id) as total FROM completions c JOIN drills d ON d.id = c.drill_id
+           JOIN players p ON p.id = c.player_id
+           WHERE d.team_id = $1 AND d.date BETWEEN $2 AND $3 AND p.status = 'active'`,
+          [team.id, season.start_date, endDate]
+        );
+        const totalComps = parseInt(compsResult.rows[0]?.total || 0, 10);
+        clubTotalCompletions += totalComps;
+
+        completionRate = (totalDrills * playerCount) > 0
+          ? Math.round((totalComps / (totalDrills * playerCount)) * 100) : 0;
+      }
+
+      // Last activity
+      const lastActResult = await pool.query(
+        `SELECT MAX(c.completed_at) as last_active FROM completions c JOIN drills d ON d.id = c.drill_id
+         WHERE d.team_id = $1`,
+        [team.id]
+      );
+      lastActivity = lastActResult.rows[0]?.last_active || null;
+
+      const isDormant = !lastActivity || new Date(lastActivity) < tenDaysAgo;
+
+      teamStats.push({
+        id: team.id,
+        name: team.name,
+        player_count: playerCount,
+        active_this_week: activeCount,
+        active_percent: playerCount > 0 ? Math.round((activeCount / playerCount) * 100) : 0,
+        completion_rate: completionRate,
+        last_activity: lastActivity,
+        dormant: isDormant,
+        has_season: !!season,
+      });
+    }
+
+    // Club-wide weekly trend
+    const weeklyTrend = [];
+    for (let w = 7; w >= 0; w--) {
+      const wStart = new Date(now);
+      wStart.setUTCDate(now.getUTCDate() + mondayOffset - (w * 7));
+      wStart.setUTCHours(0, 0, 0, 0);
+      const wEnd = new Date(wStart);
+      wEnd.setUTCDate(wStart.getUTCDate() + 6);
+      const wStartStr = wStart.toISOString().split('T')[0];
+      const wEndStr = wEnd.toISOString().split('T')[0];
+
+      const teamIds = teamsResult.rows.map(t => t.id);
+      if (teamIds.length > 0) {
+        const weekResult = await pool.query(
+          `SELECT COUNT(c.id) as completions
+           FROM completions c JOIN drills d ON d.id = c.drill_id
+           WHERE d.team_id = ANY($1::uuid[]) AND d.date BETWEEN $2 AND $3`,
+          [teamIds, wStartStr, wEndStr]
+        );
+        weeklyTrend.push({
+          week_start: wStartStr,
+          completions: parseInt(weekResult.rows[0]?.completions || 0, 10),
+        });
+      } else {
+        weeklyTrend.push({ week_start: wStartStr, completions: 0 });
+      }
+    }
+
+    const clubCompletionRate = clubTotalDrills > 0 ? Math.round((clubTotalCompletions / clubTotalDrills) * 100) : 0;
+
+    res.json({
+      total_teams: teamsResult.rows.length,
+      total_players: clubTotalPlayers,
+      active_this_week: clubActiveThisWeek,
+      club_completion_rate: clubCompletionRate,
+      team_stats: teamStats,
+      weekly_trend: weeklyTrend,
+    });
+  } catch (err) {
+    console.error('Club reports error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -4244,9 +4565,9 @@ async function seedLevels() {
     const l = LEVELS[i];
     await pool.query(
       `INSERT INTO levels (name, threshold, shield_color, text_color, sort_order, is_prestige)
-       VALUES ($1, $2, $3, $4, $5, false)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT DO NOTHING`,
-      [l.name, l.threshold, l.color, l.textColor, i]
+      [l.name, l.threshold, l.color, l.textColor, i, l.isPrestige || false]
     );
   }
   console.log('Seeded levels.');
@@ -4371,6 +4692,46 @@ async function runBuild3Migrations() {
   }
 
   console.log('Build 3 migrations complete.');
+}
+
+async function runBuild4Migrations() {
+  // Build 4: Replace level ladder with 24 tiers and recompute player levels
+
+  // Clear old levels and re-seed with the new 24-tier ladder
+  await pool.query('DELETE FROM levels');
+  for (let i = 0; i < LEVELS.length; i++) {
+    const l = LEVELS[i];
+    await pool.query(
+      `INSERT INTO levels (name, threshold, shield_color, text_color, sort_order, is_prestige)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [l.name, l.threshold, l.color, l.textColor, i, l.isPrestige || false]
+    );
+  }
+  console.log('Replaced levels with 24-tier ladder.');
+
+  // Recompute every player's current_level_id based on season points
+  // Find all players with an active season
+  const activeSeasons = await pool.query(
+    "SELECT id, team_id, start_date, end_date FROM seasons WHERE status = 'active'"
+  );
+
+  let recomputed = 0;
+  for (const season of activeSeasons.rows) {
+    const players = await pool.query(
+      "SELECT id FROM players WHERE team_id = $1 AND status = 'active'",
+      [season.team_id]
+    );
+    for (const player of players.rows) {
+      try {
+        await updatePlayerStats(player.id, season.team_id);
+        recomputed++;
+      } catch (err) {
+        console.error(`Failed to recompute stats for player ${player.id}:`, err.message);
+      }
+    }
+  }
+  console.log(`Build 4: Recomputed stats for ${recomputed} players.`);
+  console.log('Build 4 migrations complete.');
 }
 
 async function seedAppSettings() {
@@ -4828,6 +5189,7 @@ async function initDatabase() {
         await seedLevels();
         await runBuild2Migrations();
         await runBuild3Migrations();
+        await runBuild4Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -4857,6 +5219,7 @@ async function initDatabase() {
     await seedLevels();
     await runBuild2Migrations();
     await runBuild3Migrations();
+    await runBuild4Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {

@@ -30,6 +30,10 @@ export default function ClubAdmin() {
   const [success, setSuccess] = useState('');
   const [error, setError] = useState('');
 
+  // Reports
+  const [clubReports, setClubReports] = useState(null);
+  const [reportsLoading, setReportsLoading] = useState(false);
+
   // Players for move (loaded when a team is selected)
   const [teamPlayers, setTeamPlayers] = useState([]);
   const [moveSourceTeam, setMoveSourceTeam] = useState('');
@@ -47,6 +51,15 @@ export default function ClubAdmin() {
       const data = await apiFetch('/api/club/coaches');
       setCoaches(data.coaches);
     } catch (err) { console.error(err); }
+  }, [apiFetch]);
+
+  const loadClubReports = useCallback(async () => {
+    setReportsLoading(true);
+    try {
+      const data = await apiFetch('/api/club/reports');
+      setClubReports(data);
+    } catch (err) { console.error(err); }
+    finally { setReportsLoading(false); }
   }, [apiFetch]);
 
   useEffect(() => { loadDashboard(); loadCoaches(); }, [loadDashboard, loadCoaches]);
@@ -221,11 +234,11 @@ export default function ClubAdmin() {
       </header>
 
       <nav className="admin-nav">
-        {['teams','import','billing'].map(tab => (
+        {['teams','reports','import','billing'].map(tab => (
           <button key={tab} className={`admin-nav-item ${activeTab === tab ? 'active' : ''}`}
             onClick={() => { setActiveTab(tab); setSuccess(''); setError(''); }}
             style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>
-            {tab === 'teams' ? 'Teams' : tab === 'import' ? 'Import' : 'Billing'}
+            {tab === 'teams' ? 'Teams' : tab === 'reports' ? 'Reports' : tab === 'import' ? 'Import' : 'Billing'}
           </button>
         ))}
       </nav>
@@ -303,6 +316,98 @@ export default function ClubAdmin() {
                   </div>
                 ))}
               </div>
+            )}
+          </>
+        )}
+
+        {/* REPORTS TAB */}
+        {activeTab === 'reports' && (
+          <>
+            <h2 className="page-title" style={{ fontSize: '1.1rem' }}>Club Reports</h2>
+            {!clubReports && !reportsLoading && (
+              <button className="btn btn-orange btn-sm" onClick={loadClubReports}>Load Reports</button>
+            )}
+            {reportsLoading && <div className="loading"><div className="spinner" /></div>}
+            {clubReports && (
+              <>
+                {/* Club-wide summary */}
+                <div className="card" style={{ marginBottom: 12, padding: '14px 16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>This Week</div>
+                      <div style={{ fontSize: '1.3rem', fontWeight: 800 }}>
+                        <span style={{ color: 'var(--orange)' }}>{clubReports.active_this_week}</span>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-muted)' }}> of {clubReports.total_players} active</span>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Completion Rate</div>
+                      <div style={{ fontSize: '1.3rem', fontWeight: 800, color: 'var(--orange)' }}>{clubReports.club_completion_rate}%</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                    {clubReports.total_teams} team{clubReports.total_teams !== 1 ? 's' : ''} &middot; {clubReports.total_players} players
+                  </div>
+                </div>
+
+                {/* Dormant teams warning */}
+                {clubReports.team_stats.some(t => t.dormant) && (
+                  <div style={{ background: 'rgba(243,156,18,0.1)', border: '1px solid rgba(243,156,18,0.3)', borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: '0.82rem' }}>
+                    <div style={{ fontWeight: 700, color: '#f39c12', marginBottom: 4 }}>Dormant Teams</div>
+                    <div style={{ color: 'var(--text-muted)' }}>
+                      No activity in 10+ days: {clubReports.team_stats.filter(t => t.dormant).map(t => t.name).join(', ')}
+                    </div>
+                  </div>
+                )}
+
+                {/* Weekly trend */}
+                {(() => {
+                  const maxW = Math.max(...clubReports.weekly_trend.map(w => w.completions), 1);
+                  return (
+                    <div className="card" style={{ marginBottom: 12, padding: '14px 16px' }}>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 10 }}>Weekly Completions (Club-wide)</div>
+                      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 80 }}>
+                        {clubReports.weekly_trend.map((w, i) => {
+                          const fmtDate = (ds) => { const d = new Date((ds||'').split('T')[0] + 'T00:00:00'); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+                          return (
+                            <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>{w.completions || ''}</div>
+                              <div style={{ width: '100%', background: i === clubReports.weekly_trend.length - 1 ? 'var(--orange)' : 'var(--card-border)', borderRadius: 3, height: `${Math.max((w.completions / maxW) * 60, 2)}px` }} />
+                              <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>{fmtDate(w.week_start)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Per-team stats */}
+                <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 8 }}>Teams</div>
+                {clubReports.team_stats.map(t => (
+                  <div key={t.id} className="card" style={{ marginBottom: 6, padding: '10px 14px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <span style={{ fontWeight: 600 }}>{t.name}</span>
+                        {t.dormant && <span style={{ marginLeft: 8, fontSize: '0.7rem', padding: '1px 6px', borderRadius: 4, background: 'rgba(243,156,18,0.15)', color: '#f39c12' }}>Dormant</span>}
+                        {!t.has_season && <span style={{ marginLeft: 8, fontSize: '0.7rem', padding: '1px 6px', borderRadius: 4, background: 'rgba(108,108,108,0.15)', color: 'var(--text-muted)' }}>No season</span>}
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        {t.last_activity ? (() => {
+                          const d = new Date(t.last_activity);
+                          const diff = Math.floor((new Date() - d) / (1000*60*60*24));
+                          return diff === 0 ? 'Today' : diff === 1 ? 'Yesterday' : `${diff}d ago`;
+                        })() : 'Never'}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      <span>{t.player_count} players</span>
+                      <span>{t.active_percent}% active this week</span>
+                      <span>{t.completion_rate}% completion rate</span>
+                    </div>
+                  </div>
+                ))}
+              </>
             )}
           </>
         )}

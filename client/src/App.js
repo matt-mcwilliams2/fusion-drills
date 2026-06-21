@@ -13,6 +13,7 @@ import Drills from './pages/admin/Drills';
 import Seasons from './pages/admin/Seasons';
 import AdminLeaderboard from './pages/admin/Leaderboard';
 import InviteCoach from './pages/admin/InviteCoach';
+import Reports from './pages/admin/Reports';
 import SuperAdmin from './pages/SuperAdmin';
 import ClubAdmin from './pages/ClubAdmin';
 import InviteAccept from './pages/InviteAccept';
@@ -74,6 +75,7 @@ function AppRoutes() {
         <Route path="drills" element={<Drills />} />
         <Route path="seasons" element={<Seasons />} />
         <Route path="leaderboard" element={<AdminLeaderboard />} />
+        <Route path="reports" element={<Reports />} />
         <Route path="invite" element={<InviteCoach />} />
       </Route>
       <Route path="/super" element={<StaffRoute roles={['super_admin']}><SuperAdmin /></StaffRoute>} />

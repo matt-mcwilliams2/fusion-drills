@@ -16,10 +16,11 @@ export default function Drills() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5', is_challenge: false });
+  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '20', points_extra: '5', is_challenge: false });
   const [hasQuestions, setHasQuestions] = useState(false);
   const [questions, setQuestions] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [showPointGuide, setShowPointGuide] = useState(false);
 
   const loadDrills = async () => {
     try {
@@ -33,7 +34,7 @@ export default function Drills() {
 
   const openAdd = () => {
     setEditing(null);
-    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '10', points_extra: '5', is_challenge: false });
+    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '20', points_extra: '5', is_challenge: false });
     setHasQuestions(false);
     setQuestions([]);
     setShowModal(true);
@@ -234,16 +235,41 @@ export default function Drills() {
                 <input type="checkbox" checked={form.is_challenge} onChange={(e) => setForm({...form, is_challenge: e.target.checked})} />
                 <span>Challenge Day</span>
               </label>
-              <div className="form-row">
+              <div className="form-row" style={{ alignItems: 'flex-start' }}>
                 <div className="form-group form-group-half">
-                  <label className="form-label">Points: Completion</label>
+                  <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    Points: Completion
+                    <button type="button" onClick={() => setShowPointGuide(!showPointGuide)} style={{ background: 'none', border: '1px solid var(--card-border)', borderRadius: '50%', width: 20, height: 20, fontSize: '0.7rem', color: 'var(--text-muted)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, lineHeight: 1 }} title="Point guidelines">i</button>
+                  </label>
                   <input className="form-input" type="number" min="0" value={form.points_completion} onChange={(e) => setForm({...form, points_completion: e.target.value})} />
+                  {(parseInt(form.points_completion, 10) > 30 || (parseInt(form.points_completion, 10) < 10 && form.points_completion !== '')) && (
+                    <div style={{ fontSize: '0.75rem', color: '#f39c12', marginTop: 4 }}>
+                      That's outside the recommended range (10-30). Fine for an occasional big day, but check the guideline.
+                    </div>
+                  )}
                 </div>
                 <div className="form-group form-group-half">
                   <label className="form-label">Points: Extra 15 min</label>
                   <input className="form-input" type="number" min="0" value={form.points_extra} onChange={(e) => setForm({...form, points_extra: e.target.value})} />
                 </div>
               </div>
+
+              {showPointGuide && (
+                <div style={{ background: 'rgba(247,124,0,0.08)', border: '1px solid var(--card-border)', borderRadius: 8, padding: '12px 14px', marginBottom: 12, fontSize: '0.82rem', color: 'var(--text-muted)', position: 'relative' }}>
+                  <button type="button" onClick={() => setShowPointGuide(false)} style={{ position: 'absolute', top: 6, right: 10, background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1rem' }}>x</button>
+                  <div style={{ fontWeight: 700, marginBottom: 6, color: 'var(--orange)' }}>Point Guideline</div>
+                  <p style={{ margin: '0 0 8px' }}>
+                    Most days should total around 20 to 30 points for a player. That keeps active kids climbing about a level every 1 to 2 weeks. Run a bigger day now and then with challenge days or higher values to keep it exciting. Just don't make every day a huge day, or kids reach the top levels too fast and the climb stops feeling earned.
+                  </p>
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Recommended ranges:</div>
+                  <ul style={{ margin: '0 0 0 16px', padding: 0, lineHeight: 1.6 }}>
+                    <li>Completion points: 15-25 per drill (default 20)</li>
+                    <li>Extra 15 min bonus: 5-10 (default 5)</li>
+                    <li>Question points: 2-5 each</li>
+                    <li>Challenge day: up to 2x normal completion, used occasionally</li>
+                  </ul>
+                </div>
+              )}
 
               {/* Questions Toggle */}
               <label className="form-checkbox">

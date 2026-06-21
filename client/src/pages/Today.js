@@ -553,6 +553,8 @@ export default function Today() {
                   name={celebration.level.name}
                   color={celebration.level.color}
                   textColor={celebration.level.textColor}
+                  isPrestige={celebration.level.isPrestige}
+                  subtitle={celebration.level.subtitle}
                   size="large"
                 />
                 <div className="celebration-title">Level Up!</div>

@@ -45,7 +45,7 @@ export default function Leaderboard() {
             <Avatar firstName={p.first_name} lastName={p.last_name} level={p.level} latestBadgeEmoji={p.latest_badge_emoji} size={38} />
             <div className="lb-info">
               <div className="lb-name">
-                {p.level && <LevelShield name={p.level.name} color={p.level.color} textColor={p.level.textColor} size="small" />}
+                {p.level && <LevelShield name={p.level.name} color={p.level.color} textColor={p.level.textColor} isPrestige={p.level.isPrestige} subtitle={p.level.subtitle} size="small" />}
                 {p.first_name} {p.last_name}
               </div>
               <div className="lb-streak">
