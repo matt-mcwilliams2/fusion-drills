@@ -153,15 +153,12 @@ export default function Roster() {
 
       {teamInfo && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, padding: '10px 14px', background: '#f5f5f5', borderRadius: 8, justifyContent: 'flex-start' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.9em', fontWeight: 600 }}>
-            <input
-              type="checkbox"
-              checked={!!teamInfo.has_under_13}
-              onChange={handleUnder13Toggle}
-              style={{ width: 18, height: 18 }}
-            />
-            Under-13 Consent Required
-          </label>
+          <input
+            type="checkbox"
+            checked={!!teamInfo.has_under_13}
+            onChange={handleUnder13Toggle}
+            style={{ width: 18, height: 18, cursor: 'pointer' }}
+          />
           <span style={{ fontSize: '0.8em', color: '#666' }}>
             {teamInfo.has_under_13 ? 'Players need parental consent to log in' : 'Check this box if you have players under age 13.'}
           </span>
