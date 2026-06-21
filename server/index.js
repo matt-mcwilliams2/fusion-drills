@@ -7,15 +7,27 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const { Pool } = require('pg');
+const { Resend } = require('resend');
+const { TOTP, Secret } = require('otpauth');
+const QRCode = require('qrcode');
+const cron = require('node-cron');
 
 const app = express();
 const dbUrl = process.env.DATABASE_URL || '';
 const isInternalRailway = dbUrl.includes('.railway.internal');
+
+// SSL/TLS configuration:
+// - In production (non-internal Railway): pg client connects via SSL
+// - Railway managed Postgres provides encryption at rest via disk-level encryption
+// - Internal Railway connections use private networking (*.railway.internal) which does not require SSL
+// NOTE: Railway database backups should be set to expire on a schedule in the Railway dashboard,
+// since backups outlive the live data and may contain personal information subject to retention policy.
 const pool = new Pool({
   connectionString: dbUrl,
   ssl: (!isInternalRailway && process.env.NODE_ENV === 'production') ? { rejectUnauthorized: false } : false,
 });
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+const APP_URL = process.env.APP_URL || 'http://localhost:3000';
 
 app.use(cors());
 app.use(express.json());
@@ -165,6 +177,218 @@ async function requireTeamAccess(req, res, next) {
     console.error('Team access check error:', err);
     return res.status(500).json({ error: 'Server error' });
   }
+}
+
+// ============================================================
+// EMAIL SERVICE
+// ============================================================
+
+const resendClient = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
+
+if (!resendClient) {
+  console.warn('WARNING: Email not configured (RESEND_API_KEY missing). Emails will be queued to the database.');
+}
+
+async function sendEmail(toEmail, subject, htmlBody) {
+  const from = process.env.EMAIL_FROM || 'noreply@dailyreps.app';
+  if (resendClient) {
+    try {
+      await resendClient.emails.send({ from, to: toEmail, subject, html: htmlBody });
+      return true;
+    } catch (err) {
+      console.error('Email send error:', err.message);
+      // Fall through to queue
+    }
+  }
+
+  // Queue to pending_emails table
+  try {
+    await pool.query(
+      'INSERT INTO pending_emails (to_email, subject, html_body) VALUES ($1, $2, $3)',
+      [toEmail, subject, htmlBody]
+    );
+    console.log(`Email queued for ${toEmail}: ${subject}`);
+  } catch (err) {
+    console.error('Email queue error:', err.message);
+  }
+  return false;
+}
+
+async function processEmailQueue() {
+  if (!resendClient) return;
+  const from = process.env.EMAIL_FROM || 'noreply@dailyreps.app';
+  try {
+    const pending = await pool.query(
+      "SELECT * FROM pending_emails WHERE status = 'pending' ORDER BY created_at ASC LIMIT 50"
+    );
+    for (const email of pending.rows) {
+      try {
+        await resendClient.emails.send({
+          from,
+          to: email.to_email,
+          subject: email.subject,
+          html: email.html_body,
+        });
+        await pool.query(
+          "UPDATE pending_emails SET status = 'sent', sent_at = NOW() WHERE id = $1",
+          [email.id]
+        );
+      } catch (err) {
+        await pool.query(
+          "UPDATE pending_emails SET attempts = attempts + 1, last_error = $1 WHERE id = $2",
+          [err.message, email.id]
+        );
+      }
+    }
+    if (pending.rows.length > 0) {
+      console.log(`Processed ${pending.rows.length} queued emails.`);
+    }
+  } catch (err) {
+    console.error('Email queue processing error:', err.message);
+  }
+}
+
+// ============================================================
+// AUDIT LOGGING
+// ============================================================
+
+async function auditLog(actorType, actorId, action, targetType, targetId, metadata = {}, req = null) {
+  try {
+    await pool.query(
+      `INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        actorType,
+        actorId,
+        action,
+        targetType,
+        targetId,
+        JSON.stringify(metadata),
+        req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress) : null,
+        req ? req.headers['user-agent'] : null,
+      ]
+    );
+  } catch (err) {
+    console.error('Audit log error:', err.message);
+  }
+}
+
+// ============================================================
+// PASSWORD STRENGTH (STAFF ONLY)
+// ============================================================
+
+const COMMON_PASSWORDS = [
+  'password', 'password1', 'password12', 'password123', 'password1234', 'password12345',
+  'password123456', '123456', '12345678', '1234567890', '123456789012', 'qwerty', 'qwerty123',
+  'qwerty123456', 'letmein', 'letmein1234', 'letmein12345', 'welcome', 'welcome123',
+  'welcome1234', 'welcome12345', 'admin', 'admin123', 'admin1234', 'admin12345',
+  'admin123456', 'changeme', 'changeme123', 'changeme1234', 'iloveyou', 'iloveyou123',
+  'iloveyou1234', 'sunshine', 'sunshine123', 'sunshine1234', 'princess', 'princess123',
+  'princess1234', 'football', 'football123', 'football1234', 'baseball', 'baseball123',
+  'baseball1234', 'shadow', 'shadow123', 'shadow1234', 'shadow12345', 'master', 'master123',
+  'master1234', 'master12345', 'dragon', 'dragon123', 'dragon1234', 'dragon12345',
+  'monkey', 'monkey123', 'monkey1234', 'monkey12345', 'abc123', 'abc1234', 'abc12345',
+  'abc123456', 'abc1234567890', 'trustno1', 'trustno123', 'trustno1234', 'soccer',
+  'soccer123', 'soccer1234', 'soccer12345', 'hockey', 'hockey123', 'hockey1234',
+  'ranger', 'ranger123', 'ranger1234', 'buster', 'buster123', 'buster1234',
+  'killer', 'killer123', 'killer1234', 'george', 'george123', 'george1234',
+  'pepper', 'pepper123', 'pepper1234', 'daniel', 'daniel123', 'daniel1234',
+  'access', 'access123', 'access1234', 'joshua', 'joshua123', 'joshua1234',
+  'michael', 'michael123', 'michael1234', 'starwars', 'starwars123', 'starwars1234',
+  'dallas', 'dallas123', 'dallas1234', 'yankees', 'yankees123', 'yankees1234',
+  'jordan', 'jordan123', 'jordan1234', 'taylor', 'taylor123', 'taylor1234',
+  'abcdefghijkl', 'abcdef123456', '123456abcdef', 'aaaaaaaaaaaa', '111111111111',
+  '121212121212', 'password2024', 'password2025', 'password2026', 'qwertyuiop12',
+  'baseball12345', 'football12345', 'superman', 'superman123', 'superman1234',
+  'batman', 'batman1234', 'batman12345', 'whatever', 'whatever123', 'whatever1234',
+  'passw0rd', 'passw0rd1234', 'p@ssword', 'p@ssword123', 'p@ssword1234',
+  'test', 'test1234', 'test12345', 'test123456', 'guest', 'guest1234', 'guest12345',
+  'dailyreps123', 'dailyreps1234', 'coaching1234', 'coaching12345',
+];
+
+function validateStaffPassword(password) {
+  if (!password || password.length < 12) {
+    return 'Password must be at least 12 characters long';
+  }
+  if (!/[a-zA-Z]/.test(password)) {
+    return 'Password must contain at least one letter';
+  }
+  if (!/[0-9]/.test(password)) {
+    return 'Password must contain at least one number';
+  }
+  if (COMMON_PASSWORDS.includes(password.toLowerCase())) {
+    return 'This password is too common. Please choose a stronger password';
+  }
+  return null;
+}
+
+// ============================================================
+// CONSENT TOKENS
+// ============================================================
+
+const CONSENT_SECRET = JWT_SECRET + '-consent';
+
+function generateConsentToken(playerId, parentEmail, purpose = 'consent') {
+  return jwt.sign(
+    { player_id: playerId, parent_email: parentEmail, purpose },
+    CONSENT_SECRET,
+    { expiresIn: '48h' }
+  );
+}
+
+function verifyConsentToken(token, expectedPurpose = 'consent') {
+  try {
+    const decoded = jwt.verify(token, CONSENT_SECRET);
+    if (decoded.purpose !== expectedPurpose) return null;
+    return decoded;
+  } catch (err) {
+    return null;
+  }
+}
+
+function generateParentPortalToken(parentEmail) {
+  return jwt.sign(
+    { parent_email: parentEmail, purpose: 'parent_portal' },
+    CONSENT_SECRET,
+    { expiresIn: '1h' }
+  );
+}
+
+// Helper to build consent email HTML
+async function sendConsentEmail(player, teamName, parentEmail) {
+  const settings = await pool.query('SELECT consent_language, privacy_policy_version FROM app_settings WHERE id = 1');
+  const appSettings = settings.rows[0];
+  const token = generateConsentToken(player.id, parentEmail);
+  const consentUrl = `${APP_URL}/consent/${token}`;
+  const portalUrl = `${APP_URL}/parent-portal`;
+
+  const emailHtml = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #222;">
+      <h2 style="color: #1348e5;">Daily Reps — Parental Consent Required</h2>
+      <p>Hello,</p>
+      <p>Your child <strong>${player.first_name} ${player.last_name}</strong> has been added to the
+      <strong>${teamName}</strong> team on Daily Reps, a soccer training app.</p>
+      <p>Because this team includes players under 13, we need your consent before your child can use the app.</p>
+      <p>Please review the information below and click the button to give consent:</p>
+      <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
+      ${appSettings.consent_language}
+      <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
+      <p style="text-align: center;">
+        <a href="${consentUrl}" style="display: inline-block; padding: 14px 28px; background: #1348e5; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+          Review &amp; Give Consent
+        </a>
+      </p>
+      <p style="font-size: 0.85em; color: #666; margin-top: 24px;">
+        This link expires in 48 hours. If it expires, ask the coach to resend it.<br>
+        <a href="${APP_URL}/privacy">View our Privacy Policy (v${appSettings.privacy_policy_version})</a><br>
+        <a href="${portalUrl}">Parent Portal</a> — Review your child's data or manage consent at any time.
+      </p>
+    </div>
+  `;
+
+  await sendEmail(parentEmail, `Daily Reps: Consent required for ${player.first_name}`, emailHtml);
 }
 
 // ============================================================
@@ -522,6 +746,33 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // MFA: if already enabled, require TOTP verification
+    if (user.mfa_enabled && user.mfa_secret) {
+      const mfaSession = jwt.sign(
+        { id: user.id, purpose: 'mfa' },
+        JWT_SECRET,
+        { expiresIn: '5m' }
+      );
+      return res.json({ mfa_required: true, mfa_session: mfaSession });
+    }
+
+    // MFA: if required role but not yet enrolled, force setup
+    const mfaRequiredRoles = ['super_admin', 'club_admin'];
+    if (mfaRequiredRoles.includes(user.role) && !user.mfa_enabled) {
+      const setupToken = jwt.sign(
+        { id: user.id, email: user.email, role: user.role, first_name: user.first_name,
+          last_name: user.last_name, club_id: user.club_id, mfa_setup_required: true },
+        JWT_SECRET,
+        { expiresIn: '15m' }
+      );
+      return res.json({
+        mfa_setup_required: true,
+        token: setupToken,
+        user: { id: user.id, email: user.email, role: user.role,
+                first_name: user.first_name, last_name: user.last_name, club_id: user.club_id },
+      });
+    }
+
     const tokenPayload = {
       id: user.id,
       email: user.email,
@@ -547,7 +798,10 @@ app.post('/api/auth/login', async (req, res) => {
       teams = teamsResult.rows;
     }
 
-    res.json({ token, user: tokenPayload, teams });
+    // Offer MFA to coaches who haven't enabled it
+    const mfa_prompt = (user.role === 'coach' && !user.mfa_enabled) ? true : undefined;
+
+    res.json({ token, user: tokenPayload, teams, mfa_prompt });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -575,7 +829,7 @@ app.post('/api/auth/player-login', async (req, res) => {
     const team = teamResult.rows[0];
 
     const playerResult = await pool.query(
-      "SELECT * FROM players WHERE team_id = $1 AND username = $2 AND status = 'active'",
+      'SELECT * FROM players WHERE team_id = $1 AND username = $2',
       [team.id, username.trim()]
     );
 
@@ -584,6 +838,21 @@ app.post('/api/auth/player-login', async (req, res) => {
     }
 
     const player = playerResult.rows[0];
+
+    // Check player status before password verification
+    if (player.status === 'inactive') {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (player.status === 'pending') {
+      if (player.consent_status === 'awaiting' || player.consent_status === 'revoked') {
+        return res.status(403).json({
+          error: 'consent_required',
+          message: 'Your account is waiting for a parent or guardian to give permission. Ask your coach or parent to check their email.',
+        });
+      }
+      return res.status(401).json({ error: 'Your account is not yet active. Please contact your coach.' });
+    }
+
     const validPassword = await bcrypt.compare(password, player.password_hash);
 
     if (!validPassword) {
@@ -1286,7 +1555,7 @@ app.get('/api/me/badges', authenticate, requireRole('player'), async (req, res) 
 app.get('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, username, first_name, last_name, avatar_color, status, created_at FROM players WHERE team_id = $1 ORDER BY last_name ASC",
+      "SELECT id, username, first_name, last_name, avatar_color, status, consent_status, parent_email, created_at FROM players WHERE team_id = $1 ORDER BY last_name ASC",
       [req.teamId]
     );
 
@@ -1327,23 +1596,53 @@ app.get('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 
   }
 });
 
-app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
+app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
   try {
-    const { first_name, last_name, username, password } = req.body;
+    const { first_name, last_name, username, password, parent_email } = req.body;
     if (!first_name || !last_name || !username || !password) {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
+    // Check if team requires consent
+    const teamResult = await pool.query('SELECT has_under_13, name FROM teams WHERE id = $1', [req.teamId]);
+    const requiresConsent = teamResult.rows[0]?.has_under_13 === true;
+
+    if (requiresConsent && !parent_email) {
+      return res.status(400).json({ error: 'Parent email is required for teams with under-13 players' });
+    }
+
+    const playerStatus = requiresConsent ? 'pending' : 'active';
+    const consentStatus = requiresConsent ? 'awaiting' : 'not_required';
+
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status)
-       VALUES ($1, $2, $3, $4, $5, 'active')
-       RETURNING id, username, first_name, last_name, avatar_color, status, created_at`,
-      [req.teamId, first_name, last_name, username.trim(), passwordHash]
+      `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, username, first_name, last_name, avatar_color, status, consent_status, parent_email, created_at`,
+      [req.teamId, first_name, last_name, username.trim(), passwordHash, playerStatus, consentStatus, parent_email || null]
     );
 
-    res.status(201).json({ ...result.rows[0], active: true });
+    const newPlayer = result.rows[0];
+    await auditLog('staff', req.user.id, 'player_created', 'player', newPlayer.id,
+      { consent_required: requiresConsent }, req);
+
+    // Auto-send consent email if consent required and parent_email present
+    if (requiresConsent && parent_email) {
+      try {
+        await sendConsentEmail(
+          { id: newPlayer.id, first_name, last_name },
+          teamResult.rows[0].name,
+          parent_email
+        );
+        await auditLog('system', null, 'consent_email_sent', 'player', newPlayer.id,
+          { parent_email }, req);
+      } catch (emailErr) {
+        console.error('Auto consent email error:', emailErr.message);
+      }
+    }
+
+    res.status(201).json({ ...newPlayer, active: newPlayer.status === 'active' });
   } catch (err) {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Username already exists on this team' });
@@ -1353,13 +1652,14 @@ app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin')
   }
 });
 
-app.put('/api/admin/players/:id/deactivate', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
+app.put('/api/admin/players/:id/deactivate', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
   try {
     const result = await pool.query(
-      "UPDATE players SET status = 'inactive' WHERE id = $1 AND team_id = $2 RETURNING id, username, first_name, last_name, status",
+      "UPDATE players SET status = 'inactive', deactivated_at = NOW() WHERE id = $1 AND team_id = $2 RETURNING id, username, first_name, last_name, status",
       [req.params.id, req.teamId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Player not found' });
+    await auditLog('staff', req.user.id, 'player_deactivated', 'player', req.params.id, {}, req);
     res.json({ ...result.rows[0], active: false });
   } catch (err) {
     console.error('Deactivate player error:', err);
@@ -1794,6 +2094,9 @@ app.post('/api/admin/coaches', authenticate, requireRole('coach', 'super_admin')
       return res.status(400).json({ error: 'All fields are required' });
     }
 
+    const pwError = validateStaffPassword(password);
+    if (pwError) return res.status(400).json({ error: pwError });
+
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Check if user with this email already exists
@@ -1874,6 +2177,710 @@ app.get('/t/:joinCode/manifest.json', async (req, res) => {
       background_color: '#000000',
       orientation: 'portrait',
     });
+  }
+});
+
+// ============================================================
+// MFA ENDPOINTS
+// ============================================================
+
+// POST /api/auth/mfa/setup - Generate TOTP secret and QR code
+app.post('/api/auth/mfa/setup', authenticate, async (req, res) => {
+  try {
+    if (req.role === 'player') {
+      return res.status(403).json({ error: 'MFA not available for players' });
+    }
+
+    const user = await pool.query('SELECT id, email, mfa_enabled, mfa_secret FROM users WHERE id = $1', [req.user.id]);
+    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    if (user.rows[0].mfa_enabled) {
+      return res.status(400).json({ error: 'MFA already enabled' });
+    }
+
+    const secret = new Secret({ size: 20 });
+    const totp = new TOTP({
+      issuer: 'Daily Reps',
+      label: user.rows[0].email,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret,
+    });
+
+    // Store secret (not yet enabled)
+    await pool.query('UPDATE users SET mfa_secret = $1 WHERE id = $2', [secret.base32, req.user.id]);
+
+    const otpauthUrl = totp.toString();
+    const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
+
+    res.json({
+      secret: secret.base32,
+      qr_code: qrCodeDataUrl,
+      otpauth_url: otpauthUrl,
+    });
+  } catch (err) {
+    console.error('MFA setup error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/mfa/verify-setup - Confirm MFA setup with TOTP code
+app.post('/api/auth/mfa/verify-setup', authenticate, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Code is required' });
+
+    const user = await pool.query(
+      'SELECT id, email, role, first_name, last_name, club_id, mfa_secret, mfa_enabled FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (user.rows[0].mfa_enabled) return res.status(400).json({ error: 'MFA already enabled' });
+    if (!user.rows[0].mfa_secret) return res.status(400).json({ error: 'MFA setup not initiated' });
+
+    const totp = new TOTP({
+      issuer: 'Daily Reps',
+      label: user.rows[0].email,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret: Secret.fromBase32(user.rows[0].mfa_secret),
+    });
+
+    const delta = totp.validate({ token: code, window: 1 });
+    if (delta === null) {
+      return res.status(401).json({ error: 'Invalid code. Please try again.' });
+    }
+
+    await pool.query('UPDATE users SET mfa_enabled = true WHERE id = $1', [req.user.id]);
+    await auditLog('staff', req.user.id, 'mfa_enabled', 'user', req.user.id, {}, req);
+
+    // Issue full token now that MFA is set up
+    const u = user.rows[0];
+    const tokenPayload = {
+      id: u.id, email: u.email, role: u.role,
+      first_name: u.first_name, last_name: u.last_name, club_id: u.club_id,
+    };
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+
+    let teams = [];
+    if (u.role === 'coach') {
+      const teamsResult = await pool.query(
+        `SELECT t.id, t.name, t.join_code, t.primary_color, t.logo_url FROM teams t
+         JOIN coach_teams ct ON ct.team_id = t.id WHERE ct.user_id = $1 AND t.status = 'active' ORDER BY t.name`,
+        [u.id]
+      );
+      teams = teamsResult.rows;
+    }
+
+    res.json({ token, user: tokenPayload, teams });
+  } catch (err) {
+    console.error('MFA verify-setup error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/mfa/verify - Verify TOTP during login
+app.post('/api/auth/mfa/verify', async (req, res) => {
+  try {
+    const { mfa_session, code } = req.body;
+    if (!mfa_session || !code) {
+      return res.status(400).json({ error: 'Session and code are required' });
+    }
+
+    let sessionData;
+    try {
+      sessionData = jwt.verify(mfa_session, JWT_SECRET);
+      if (sessionData.purpose !== 'mfa') throw new Error('Invalid session');
+    } catch (err) {
+      return res.status(401).json({ error: 'MFA session expired. Please log in again.' });
+    }
+
+    const user = await pool.query(
+      "SELECT * FROM users WHERE id = $1 AND status = 'active'",
+      [sessionData.id]
+    );
+    if (user.rows.length === 0) return res.status(401).json({ error: 'User not found' });
+
+    const u = user.rows[0];
+    const totp = new TOTP({
+      issuer: 'Daily Reps',
+      label: u.email,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret: Secret.fromBase32(u.mfa_secret),
+    });
+
+    const delta = totp.validate({ token: code, window: 1 });
+    if (delta === null) {
+      return res.status(401).json({ error: 'Invalid code' });
+    }
+
+    const tokenPayload = {
+      id: u.id, email: u.email, role: u.role,
+      first_name: u.first_name, last_name: u.last_name, club_id: u.club_id,
+    };
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+
+    let teams = [];
+    if (u.role === 'coach') {
+      const teamsResult = await pool.query(
+        `SELECT t.id, t.name, t.join_code, t.primary_color, t.logo_url FROM teams t
+         JOIN coach_teams ct ON ct.team_id = t.id WHERE ct.user_id = $1 AND t.status = 'active' ORDER BY t.name`,
+        [u.id]
+      );
+      teams = teamsResult.rows;
+    }
+
+    res.json({ token, user: tokenPayload, teams });
+  } catch (err) {
+    console.error('MFA verify error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// STAFF PASSWORD CHANGE
+// ============================================================
+
+app.put('/api/auth/change-password', authenticate, async (req, res) => {
+  try {
+    if (req.role === 'player') return res.status(403).json({ error: 'Use player password reset' });
+
+    const { current_password, new_password } = req.body;
+    if (!current_password || !new_password) {
+      return res.status(400).json({ error: 'Current and new passwords are required' });
+    }
+
+    const pwError = validateStaffPassword(new_password);
+    if (pwError) return res.status(400).json({ error: pwError });
+
+    const user = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const valid = await bcrypt.compare(current_password, user.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+
+    const hash = await bcrypt.hash(new_password, 10);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (err) {
+    console.error('Change password error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// TEAM CONSENT MANAGEMENT
+// ============================================================
+
+// PUT /api/admin/teams/:id/under-13
+app.put('/api/admin/teams/:id/under-13', authenticate, requireRole('coach', 'super_admin', 'club_admin'), async (req, res) => {
+  try {
+    const { has_under_13 } = req.body;
+    if (typeof has_under_13 !== 'boolean') {
+      return res.status(400).json({ error: 'has_under_13 must be a boolean' });
+    }
+
+    const teamId = req.params.id;
+
+    // Verify team access
+    if (req.role === 'coach') {
+      const check = await pool.query('SELECT 1 FROM coach_teams WHERE user_id = $1 AND team_id = $2', [req.user.id, teamId]);
+      if (check.rows.length === 0) return res.status(403).json({ error: 'No access to this team' });
+    } else if (req.role === 'club_admin') {
+      const check = await pool.query('SELECT 1 FROM teams WHERE id = $1 AND club_id = $2', [teamId, req.user.club_id]);
+      if (check.rows.length === 0) return res.status(403).json({ error: 'Team not in your club' });
+    }
+
+    const teamResult = await pool.query('UPDATE teams SET has_under_13 = $1 WHERE id = $2 RETURNING name', [has_under_13, teamId]);
+    if (teamResult.rows.length === 0) return res.status(404).json({ error: 'Team not found' });
+    const teamName = teamResult.rows[0].name;
+
+    if (has_under_13) {
+      // Lock un-consented players
+      const locked = await pool.query(
+        `UPDATE players SET status = 'pending', consent_status = 'awaiting'
+         WHERE team_id = $1 AND (consent_status IS NULL OR consent_status NOT IN ('granted'))
+         AND status = 'active'
+         RETURNING id, first_name, last_name, parent_email`,
+        [teamId]
+      );
+
+      await auditLog('staff', req.user.id, 'team_under13_enabled', 'team', teamId, { has_under_13: true }, req);
+
+      // Auto-send consent emails to locked players with parent_email
+      let emailsSent = 0;
+      for (const player of locked.rows) {
+        if (player.parent_email) {
+          try {
+            await sendConsentEmail(player, teamName, player.parent_email);
+            await auditLog('system', null, 'consent_email_sent', 'player', player.id, { parent_email: player.parent_email }, req);
+            emailsSent++;
+          } catch (emailErr) {
+            console.error(`Consent email error for player ${player.id}:`, emailErr.message);
+          }
+        }
+      }
+
+      res.json({ message: 'Team updated', has_under_13, players_locked: locked.rows.length, emails_sent: emailsSent });
+    } else {
+      // Activate awaiting players
+      await pool.query(
+        `UPDATE players SET consent_status = 'not_required', status = 'active'
+         WHERE team_id = $1 AND consent_status = 'awaiting' AND status = 'pending'`,
+        [teamId]
+      );
+      await auditLog('staff', req.user.id, 'team_under13_disabled', 'team', teamId, { has_under_13: false }, req);
+      res.json({ message: 'Team updated', has_under_13 });
+    }
+  } catch (err) {
+    console.error('Update under-13 error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/teams/current - Get current team info including has_under_13
+app.get('/api/admin/teams/current', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name, has_under_13, join_code, primary_color, logo_url FROM teams WHERE id = $1', [req.teamId]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Team not found' });
+    res.json({ team: result.rows[0] });
+  } catch (err) {
+    console.error('Get team error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// CONSENT FLOW ENDPOINTS
+// ============================================================
+
+// POST /api/admin/players/:id/send-consent - Send/resend consent email
+app.post('/api/admin/players/:id/send-consent', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const player = await pool.query(
+      'SELECT p.*, t.name as team_name FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1 AND p.team_id = $2',
+      [req.params.id, req.teamId]
+    );
+    if (player.rows.length === 0) return res.status(404).json({ error: 'Player not found' });
+
+    const p = player.rows[0];
+    if (!p.parent_email) return res.status(400).json({ error: 'No parent email on file for this player' });
+
+    await sendConsentEmail(p, p.team_name, p.parent_email);
+    await auditLog('staff', req.user.id, 'consent_email_sent', 'player', p.id, { parent_email: p.parent_email }, req);
+
+    res.json({ message: 'Consent email sent' });
+  } catch (err) {
+    console.error('Send consent error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/players/:id/record-consent - Record uploaded document consent
+app.post('/api/admin/players/:id/record-consent', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const { parent_name, document_reference } = req.body;
+    if (!parent_name) return res.status(400).json({ error: 'Parent name is required' });
+
+    const player = await pool.query(
+      'SELECT p.*, t.club_id FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1 AND p.team_id = $2',
+      [req.params.id, req.teamId]
+    );
+    if (player.rows.length === 0) return res.status(404).json({ error: 'Player not found' });
+    const p = player.rows[0];
+
+    const settings = await pool.query('SELECT privacy_policy_version, consent_language FROM app_settings WHERE id = 1');
+
+    await pool.query(
+      `INSERT INTO consent_records (player_id, team_id, club_id, parent_name, parent_email, consent_source,
+        consent_language, privacy_policy_version, status, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, 'uploaded_document', $6, $7, 'granted', $8, $9)`,
+      [p.id, req.teamId, p.club_id, parent_name, p.parent_email || 'on-file',
+       document_reference || 'Paper consent form on file',
+       settings.rows[0].privacy_policy_version,
+       req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+       req.headers['user-agent']]
+    );
+
+    await pool.query(
+      "UPDATE players SET consent_status = 'granted', status = 'active' WHERE id = $1",
+      [p.id]
+    );
+
+    await auditLog('staff', req.user.id, 'consent_granted', 'player', p.id,
+      { consent_source: 'uploaded_document', parent_name }, req);
+    await auditLog('system', null, 'player_activated', 'player', p.id,
+      { reason: 'consent_granted_document' }, req);
+
+    res.json({ message: 'Consent recorded and player activated' });
+  } catch (err) {
+    console.error('Record consent error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/players/:id/update-parent-email - Update parent email and optionally send consent
+app.post('/api/admin/players/:id/update-parent-email', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const { parent_email, send_consent } = req.body;
+    if (!parent_email) return res.status(400).json({ error: 'Parent email is required' });
+
+    const player = await pool.query(
+      'SELECT p.*, t.name as team_name FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1 AND p.team_id = $2',
+      [req.params.id, req.teamId]
+    );
+    if (player.rows.length === 0) return res.status(404).json({ error: 'Player not found' });
+
+    await pool.query('UPDATE players SET parent_email = $1 WHERE id = $2', [parent_email, req.params.id]);
+
+    const p = player.rows[0];
+    if (send_consent && p.consent_status === 'awaiting') {
+      await sendConsentEmail({ ...p, parent_email }, p.team_name, parent_email);
+      await auditLog('staff', req.user.id, 'consent_email_sent', 'player', p.id, { parent_email }, req);
+    }
+
+    res.json({ message: 'Parent email updated' });
+  } catch (err) {
+    console.error('Update parent email error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/consent/:token - Get consent info for display (public, unauthenticated)
+app.get('/api/consent/:token', async (req, res) => {
+  try {
+    const decoded = verifyConsentToken(req.params.token);
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired consent link. Please ask the coach to resend it.' });
+
+    const player = await pool.query(
+      `SELECT p.first_name, p.last_name, p.consent_status, t.name as team_name
+       FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1`,
+      [decoded.player_id]
+    );
+    if (player.rows.length === 0) return res.status(404).json({ error: 'Player not found' });
+
+    const p = player.rows[0];
+    if (p.consent_status === 'granted') {
+      return res.json({ already_granted: true, player_name: `${p.first_name} ${p.last_name}`, team_name: p.team_name });
+    }
+
+    const settings = await pool.query('SELECT consent_language, privacy_policy_version, privacy_policy_content FROM app_settings WHERE id = 1');
+
+    res.json({
+      player_name: `${p.first_name} ${p.last_name}`,
+      team_name: p.team_name,
+      consent_language: settings.rows[0].consent_language,
+      privacy_policy_version: settings.rows[0].privacy_policy_version,
+      privacy_policy_content: settings.rows[0].privacy_policy_content,
+    });
+  } catch (err) {
+    console.error('Get consent info error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/consent/:token/grant - Parent grants consent (public, unauthenticated)
+app.post('/api/consent/:token/grant', async (req, res) => {
+  try {
+    const decoded = verifyConsentToken(req.params.token);
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired consent link. Please ask the coach to resend it.' });
+
+    const { parent_name } = req.body;
+
+    const player = await pool.query(
+      'SELECT p.*, t.club_id, t.name as team_name FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1',
+      [decoded.player_id]
+    );
+    if (player.rows.length === 0) return res.status(404).json({ error: 'Player not found' });
+    const p = player.rows[0];
+
+    if (p.consent_status === 'granted') {
+      return res.json({ message: 'Consent already granted', already_granted: true });
+    }
+
+    const settings = await pool.query('SELECT consent_language, privacy_policy_version FROM app_settings WHERE id = 1');
+    const appSettings = settings.rows[0];
+
+    await pool.query(
+      `INSERT INTO consent_records (player_id, team_id, club_id, parent_name, parent_email, consent_source,
+        consent_language, privacy_policy_version, status, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, 'parent_email', $6, $7, 'granted', $8, $9)`,
+      [p.id, p.team_id, p.club_id, parent_name || 'Parent/Guardian',
+       decoded.parent_email, appSettings.consent_language,
+       appSettings.privacy_policy_version,
+       req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+       req.headers['user-agent']]
+    );
+
+    await pool.query(
+      "UPDATE players SET consent_status = 'granted', status = 'active' WHERE id = $1",
+      [p.id]
+    );
+
+    await auditLog('parent', null, 'consent_granted', 'player', p.id,
+      { consent_source: 'parent_email', parent_email: decoded.parent_email }, req);
+    await auditLog('system', null, 'player_activated', 'player', p.id,
+      { reason: 'consent_granted_email' }, req);
+
+    res.json({ message: 'Consent granted. Your child can now log in and start training!', player_name: `${p.first_name} ${p.last_name}` });
+  } catch (err) {
+    console.error('Grant consent error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// PARENT PORTAL
+// ============================================================
+
+// POST /api/parent-portal/request-link
+app.post('/api/parent-portal/request-link', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const genericResponse = { message: 'If that email is on file, we sent a link.' };
+
+    const players = await pool.query(
+      'SELECT p.id, p.first_name, p.last_name, t.name as team_name FROM players p JOIN teams t ON t.id = p.team_id WHERE p.parent_email = $1',
+      [email.toLowerCase().trim()]
+    );
+
+    if (players.rows.length === 0) {
+      return res.json(genericResponse);
+    }
+
+    const token = generateParentPortalToken(email.toLowerCase().trim());
+    const portalUrl = `${APP_URL}/parent-portal/${token}`;
+
+    const playerList = players.rows.map(p => `<li>${p.first_name} ${p.last_name} (${p.team_name})</li>`).join('');
+
+    const emailHtml = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #222;">
+        <h2 style="color: #1348e5;">Daily Reps — Parent Portal Access</h2>
+        <p>Hello,</p>
+        <p>You requested access to the Parent Portal for the following players:</p>
+        <ul>${playerList}</ul>
+        <p style="text-align: center;">
+          <a href="${portalUrl}" style="display: inline-block; padding: 14px 28px; background: #1348e5; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+            Open Parent Portal
+          </a>
+        </p>
+        <p style="font-size: 0.85em; color: #666; margin-top: 24px;">This link expires in 1 hour.</p>
+      </div>
+    `;
+
+    await sendEmail(email.toLowerCase().trim(), 'Daily Reps: Parent Portal Access', emailHtml);
+
+    res.json(genericResponse);
+  } catch (err) {
+    console.error('Parent portal request error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/parent-portal/:token - Get children data
+app.get('/api/parent-portal/:token', async (req, res) => {
+  try {
+    const decoded = verifyConsentToken(req.params.token, 'parent_portal');
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired link. Please request a new one.' });
+
+    const players = await pool.query(
+      `SELECT p.id, p.first_name, p.last_name, p.username, p.consent_status, p.status,
+              p.lifetime_points, p.created_at, t.name as team_name, t.id as team_id
+       FROM players p JOIN teams t ON t.id = p.team_id
+       WHERE p.parent_email = $1`,
+      [decoded.parent_email]
+    );
+
+    // Get stats for each player
+    const children = [];
+    for (const player of players.rows) {
+      // Get season stats
+      const statsResult = await pool.query(
+        `SELECT pss.season_points, pss.current_streak, pss.longest_streak, s.name as season_name
+         FROM player_season_stats pss
+         JOIN seasons s ON s.id = pss.season_id
+         WHERE pss.player_id = $1
+         ORDER BY s.start_date DESC LIMIT 1`,
+        [player.id]
+      );
+
+      // Get completion count
+      const completionResult = await pool.query(
+        'SELECT COUNT(*) as total_completions FROM completions WHERE player_id = $1',
+        [player.id]
+      );
+
+      // Get current level
+      const level = getLevelInfo(player.lifetime_points);
+
+      const stats = statsResult.rows[0] || {};
+      children.push({
+        id: player.id,
+        first_name: player.first_name,
+        last_name: player.last_name,
+        team_name: player.team_name,
+        consent_status: player.consent_status,
+        status: player.status,
+        lifetime_points: player.lifetime_points,
+        current_streak: stats.current_streak || 0,
+        longest_streak: stats.longest_streak || 0,
+        season_points: stats.season_points || 0,
+        total_completions: parseInt(completionResult.rows[0].total_completions),
+        level: level,
+        created_at: player.created_at,
+      });
+    }
+
+    // Get consent records
+    const consentRecords = await pool.query(
+      `SELECT cr.id, cr.player_id, cr.consent_source, cr.status, cr.granted_at, cr.revoked_at, cr.privacy_policy_version
+       FROM consent_records cr
+       WHERE cr.parent_email = $1 ORDER BY cr.created_at DESC`,
+      [decoded.parent_email]
+    );
+
+    await auditLog('parent', null, 'player_data_viewed', 'player', null,
+      { parent_email: decoded.parent_email, players_viewed: players.rows.map(p => p.id) }, req);
+
+    res.json({
+      children,
+      consent_records: consentRecords.rows,
+    });
+  } catch (err) {
+    console.error('Parent portal get error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/parent-portal/:token/revoke - Revoke consent for a player
+app.post('/api/parent-portal/:token/revoke', async (req, res) => {
+  try {
+    const decoded = verifyConsentToken(req.params.token, 'parent_portal');
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired link. Please request a new one.' });
+
+    const { player_id } = req.body;
+    if (!player_id) return res.status(400).json({ error: 'player_id is required' });
+
+    const player = await pool.query(
+      'SELECT * FROM players WHERE id = $1 AND parent_email = $2',
+      [player_id, decoded.parent_email]
+    );
+    if (player.rows.length === 0) return res.status(403).json({ error: 'Not authorized for this player' });
+
+    await pool.query(
+      "UPDATE consent_records SET status = 'revoked', revoked_at = NOW() WHERE player_id = $1 AND status = 'granted'",
+      [player_id]
+    );
+
+    await pool.query(
+      "UPDATE players SET consent_status = 'revoked', status = 'inactive', deactivated_at = NOW() WHERE id = $1",
+      [player_id]
+    );
+
+    await auditLog('parent', null, 'consent_revoked', 'player', player_id,
+      { parent_email: decoded.parent_email }, req);
+    await auditLog('system', null, 'player_deactivated', 'player', player_id,
+      { reason: 'consent_revoked' }, req);
+
+    res.json({ message: 'Consent revoked. The player account has been deactivated.' });
+  } catch (err) {
+    console.error('Revoke consent error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/parent-portal/:token/delete - Request player data deletion
+app.post('/api/parent-portal/:token/delete', async (req, res) => {
+  try {
+    const decoded = verifyConsentToken(req.params.token, 'parent_portal');
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired link. Please request a new one.' });
+
+    const { player_id } = req.body;
+    if (!player_id) return res.status(400).json({ error: 'player_id is required' });
+
+    const player = await pool.query(
+      'SELECT * FROM players WHERE id = $1 AND parent_email = $2',
+      [player_id, decoded.parent_email]
+    );
+    if (player.rows.length === 0) return res.status(403).json({ error: 'Not authorized for this player' });
+
+    await pool.query(
+      "UPDATE players SET deletion_requested_at = NOW(), status = 'inactive', consent_status = 'revoked', deactivated_at = COALESCE(deactivated_at, NOW()) WHERE id = $1",
+      [player_id]
+    );
+
+    await pool.query(
+      "UPDATE consent_records SET status = 'revoked', revoked_at = NOW() WHERE player_id = $1 AND status = 'granted'",
+      [player_id]
+    );
+
+    await auditLog('parent', null, 'deletion_requested', 'player', player_id,
+      { parent_email: decoded.parent_email }, req);
+
+    res.json({ message: 'Deletion request received. Personal data will be removed within the retention period.' });
+  } catch (err) {
+    console.error('Delete request error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// PRIVACY POLICY (server-rendered, must be before SPA catch-all)
+// ============================================================
+
+app.get('/privacy', async (req, res) => {
+  try {
+    const settings = await pool.query('SELECT privacy_policy_content, privacy_policy_version FROM app_settings WHERE id = 1');
+    if (settings.rows.length === 0) {
+      return res.status(404).send('Privacy policy not found');
+    }
+    const { privacy_policy_content, privacy_policy_version } = settings.rows[0];
+
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Daily Reps — Privacy Policy</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+           max-width: 800px; margin: 0 auto; padding: 20px; color: #222; line-height: 1.6; }
+    h1 { color: #1348e5; }
+    h2 { color: #333; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-top: 32px; }
+    ul, ol { padding-left: 24px; }
+    li { margin-bottom: 4px; }
+    .version { color: #666; font-size: 0.9em; margin-bottom: 24px; }
+    a { color: #1348e5; }
+  </style>
+</head>
+<body>
+  <div class="version">Privacy Policy Version ${privacy_policy_version}</div>
+  ${privacy_policy_content}
+  <hr style="margin-top: 40px;">
+  <p style="color: #666; font-size: 0.9em;"><a href="/">Back to Daily Reps</a></p>
+</body>
+</html>`);
+  } catch (err) {
+    console.error('Privacy policy error:', err);
+    res.status(500).send('Server error');
+  }
+});
+
+app.get('/api/privacy-policy', async (req, res) => {
+  try {
+    const settings = await pool.query('SELECT privacy_policy_content, privacy_policy_version FROM app_settings WHERE id = 1');
+    if (settings.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(settings.rows[0]);
+  } catch (err) {
+    console.error('Privacy policy API error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -2088,6 +3095,64 @@ CREATE TABLE IF NOT EXISTS player_badges (
   UNIQUE(player_id, badge_id)
 );
 CREATE INDEX IF NOT EXISTS idx_player_badges_player_id ON player_badges(player_id);
+
+CREATE TABLE IF NOT EXISTS consent_records (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  player_id UUID REFERENCES players(id) NOT NULL,
+  team_id UUID REFERENCES teams(id) NOT NULL,
+  club_id UUID REFERENCES clubs(id),
+  parent_name VARCHAR(200),
+  parent_email VARCHAR(255) NOT NULL,
+  consent_source VARCHAR(30) NOT NULL CHECK (consent_source IN ('parent_email', 'uploaded_document')),
+  consent_language TEXT,
+  privacy_policy_version VARCHAR(20),
+  status VARCHAR(20) NOT NULL DEFAULT 'granted' CHECK (status IN ('granted', 'revoked')),
+  ip_address VARCHAR(45),
+  user_agent TEXT,
+  granted_at TIMESTAMPTZ DEFAULT NOW(),
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_consent_records_player_id ON consent_records(player_id);
+CREATE INDEX IF NOT EXISTS idx_consent_records_parent_email ON consent_records(parent_email);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_type VARCHAR(20) NOT NULL CHECK (actor_type IN ('staff', 'player', 'parent', 'system')),
+  actor_id UUID,
+  action TEXT NOT NULL,
+  target_type VARCHAR(20) NOT NULL CHECK (target_type IN ('player', 'team', 'club', 'user')),
+  target_id UUID,
+  metadata JSONB DEFAULT '{}',
+  ip_address VARCHAR(45),
+  user_agent TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  privacy_policy_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+  privacy_policy_content TEXT NOT NULL DEFAULT '',
+  consent_language TEXT NOT NULL DEFAULT '',
+  retention_days INTEGER NOT NULL DEFAULT 30,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pending_emails (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  to_email VARCHAR(255) NOT NULL,
+  subject VARCHAR(500) NOT NULL,
+  html_body TEXT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+  attempts INTEGER DEFAULT 0,
+  last_error TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  sent_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_pending_emails_status ON pending_emails(status);
 `;
 
 const BADGE_SEEDS = [
@@ -2133,6 +3198,196 @@ async function seedLevels() {
     );
   }
   console.log('Seeded levels.');
+}
+
+async function runBuild2Migrations() {
+  // Add deactivated_at column to players if not exists
+  const deactivatedCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'players' AND column_name = 'deactivated_at'"
+  );
+  if (deactivatedCol.rows.length === 0) {
+    await pool.query('ALTER TABLE players ADD COLUMN deactivated_at TIMESTAMPTZ');
+    console.log('Added deactivated_at column to players.');
+  }
+
+  // Add deletion_requested_at column to players if not exists
+  const deletionCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'players' AND column_name = 'deletion_requested_at'"
+  );
+  if (deletionCol.rows.length === 0) {
+    await pool.query('ALTER TABLE players ADD COLUMN deletion_requested_at TIMESTAMPTZ');
+    console.log('Added deletion_requested_at column to players.');
+  }
+
+  console.log('Build 2 migrations complete.');
+}
+
+async function seedAppSettings() {
+  const policyContent = `<h1>Daily Reps privacy policy</h1>
+<p>Effective date: June 20, 2026</p>
+<p>Daily Reps is a soccer training web app for youth teams, clubs, and coaches. Coaches assign at-home soccer drills, players mark drills complete, and the app tracks points, streaks, levels, and team leaderboard standings.</p>
+<p>This privacy policy explains what information we collect, how we use it, who can see it, and how parents or guardians can contact us.</p>
+<h2>Who we are</h2>
+<p>Daily Reps is operated by Matt McWilliams Consulting, Inc.</p>
+<p>Contact:<br>Matt McWilliams Consulting, Inc.<br>803 S. Calhoun Street, Suite 600, Fort Wayne, IN 46802<br>privacy@mattmcwilliams.com</p>
+<h2>Information we collect</h2>
+<p>Daily Reps is designed to collect as little player information as possible.</p>
+<p>For player accounts, we may collect:</p>
+<ul>
+<li>First and last name</li>
+<li>Team or club assignment</li>
+<li>Drill completion activity</li>
+<li>Points, streaks, levels, and leaderboard position</li>
+<li>Login or account information needed to operate the app</li>
+<li>Basic technical information, such as IP address, browser type, device type, log files, and security records</li>
+</ul>
+<p>We do not ask players for date of birth, photos, videos, audio, GPS location, health information, injury notes, personal bios, chat messages, direct messages, or social media profiles.</p>
+<p>We may collect a parent or guardian email address if it is needed for consent, account notices, or optional alerts. Parent email addresses are not used for advertising or unrelated marketing.</p>
+<h2>How player accounts are created</h2>
+<p>Player accounts are created by coaches, team administrators, or club administrators. Players do not create public profiles.</p>
+<p>If a player is under 13, we require legally appropriate parent or guardian consent before activating the player account, unless another legally valid consent method applies. Consent may be collected directly from the parent or guardian, or through a process managed by the club or team and approved by Daily Reps.</p>
+<p>We may keep records showing when consent was provided, who provided it, the player account covered by the consent, the club or team, the privacy policy version, and related audit information.</p>
+<h2>How we use information</h2>
+<p>We use player information only to operate Daily Reps, including to:</p>
+<ul>
+<li>Create and manage team accounts</li>
+<li>Let coaches assign drills</li>
+<li>Let players mark drills complete</li>
+<li>Track points, streaks, levels, and team leaderboard standings</li>
+<li>Show coaches and club administrators player progress</li>
+<li>Send optional parent alerts or account notices</li>
+<li>Provide support</li>
+<li>Protect the app, prevent misuse, and maintain security</li>
+<li>Improve app performance using limited, aggregated, or de-identified information where possible</li>
+</ul>
+<p>We do not use player information for targeted advertising, behavioral advertising, ad retargeting, or unrelated marketing.</p>
+<h2>Who can see player information</h2>
+<p>Daily Reps is team-based.</p>
+<p>Players may see the first and last names, points, and leaderboard standings of their current teammates. Players cannot see players from other teams unless they are part of the same team or club view authorized by the club.</p>
+<p>Coaches may see information for players on teams they manage.</p>
+<p>Club administrators may see information for teams in their club.</p>
+<p>Daily Reps personnel may access information only when needed to operate, support, secure, or improve the service.</p>
+<h2>What we do not allow</h2>
+<p>Daily Reps does not include:</p>
+<ul>
+<li>Chat</li>
+<li>Direct messages</li>
+<li>Public profiles</li>
+<li>Public leaderboards</li>
+<li>Cross-club public rankings</li>
+<li>Social posting</li>
+<li>Comments</li>
+<li>Photos</li>
+<li>Videos</li>
+<li>Audio uploads</li>
+<li>GPS tracking</li>
+<li>Health or injury notes</li>
+<li>Advertising</li>
+<li>Marketing pixels</li>
+<li>Sale of player data</li>
+</ul>
+<h2>Service providers</h2>
+<p>We may use trusted service providers to help run Daily Reps, such as hosting, database, authentication, email delivery, logging, security, customer support, and analytics providers.</p>
+<p>These providers may process information only to help us provide Daily Reps. They are not allowed to sell player information, use it for their own advertising, or use it to build profiles unrelated to Daily Reps.</p>
+<h2>Parent and guardian rights</h2>
+<p>Parents and guardians may contact us to:</p>
+<ul>
+<li>Review the personal information we have about their child</li>
+<li>Ask us to correct inaccurate information</li>
+<li>Ask us to delete their child's information</li>
+<li>Revoke consent</li>
+<li>Stop future collection or use of their child's information</li>
+</ul>
+<p>To make a request, contact us at Matt McWilliams Consulting, Inc.<br>803 S. Calhoun Street, Suite 600, Fort Wayne, IN 46802<br>privacy@mattmcwilliams.com</p>
+<p>Before responding, we may take reasonable steps to verify that the requester is the child's parent or guardian.</p>
+<p>If a parent or guardian revokes consent or asks us to delete information needed to operate the account, the child may no longer be able to use Daily Reps.</p>
+<h2>Data retention</h2>
+<p>We keep player information only as long as reasonably needed to provide Daily Reps, support the team or club, comply with legal obligations, resolve disputes, and maintain security.</p>
+<p>Our standard retention schedule is:</p>
+<ul>
+<li>Active player information is kept while the player is part of an active team or club account.</li>
+<li>When a player leaves a team, we delete or de-identify the player's personal information within 30 days after we are notified, unless retention is legally required.</li>
+<li>When a club cancels, we delete or de-identify player personal information within 30 days after the account closes, unless the club requests a shorter period or retention is legally required.</li>
+<li>Backup copies are deleted or overwritten on our regular backup cycle, usually within 30 days.</li>
+<li>Aggregated or de-identified information may be kept longer if it cannot reasonably identify a player.</li>
+</ul>
+<h2>Security</h2>
+<p>We use reasonable administrative, technical, and physical safeguards to protect player information. These may include encryption, access controls, role-based permissions, logging, password protections, limited employee access, and vendor controls.</p>
+<p>No system is perfectly secure, but Daily Reps is designed to limit the amount of child information collected and to restrict who can access it.</p>
+<h2>State privacy rights</h2>
+<p>Depending on where a user lives, parents, guardians, or users may have additional privacy rights under state law, such as rights to access, correct, delete, or obtain a copy of personal information.</p>
+<p>Daily Reps does not sell personal information. Daily Reps does not share personal information for targeted advertising.</p>
+<p>Requests may be sent to Matt McWilliams Consulting, Inc.<br>803 S. Calhoun Street, Suite 600, Fort Wayne, IN 46802<br>privacy@mattmcwilliams.com</p>
+<h2>Changes to this policy</h2>
+<p>We may update this privacy policy from time to time. If we make material changes to how we collect, use, disclose, or retain children's personal information, we will provide notice and obtain any consent required by law before the changes apply.</p>
+<h2>Contact us</h2>
+<p>Questions or privacy requests may be sent to:</p>
+<p>Matt McWilliams Consulting, Inc.<br>803 S. Calhoun Street, Suite 600, Fort Wayne, IN 46802<br>privacy@mattmcwilliams.com</p>`;
+
+  const consentLanguage = `<h1>Parent/guardian consent for Daily Reps</h1>
+<p>Daily Reps is a soccer training app used by youth teams and clubs. Coaches assign at-home soccer drills, players mark drills complete, and the app tracks team-based points, streaks, levels, and leaderboard standings.</p>
+<p>Before your child can use Daily Reps, we need your permission to create and operate your child's player account.</p>
+<h2>What information Daily Reps collects</h2>
+<p>For your child's account, Daily Reps collects and uses only limited team-related information:</p>
+<ul>
+<li>Child's first and last name</li>
+<li>Team and club assignment</li>
+<li>Assigned drills</li>
+<li>Drill completion activity</li>
+<li>Points, streaks, levels, and team leaderboard standing</li>
+<li>Login/account information needed to operate the app</li>
+<li>Basic technical and security information, such as log records, device/browser type, and IP address</li>
+</ul>
+<p>Daily Reps does not ask your child for date of birth, photos, videos, audio, GPS location, health information, injury notes, personal bios, chat messages, direct messages, comments, or social media information.</p>
+<h2>How the information is used</h2>
+<p>Daily Reps uses this information only to:</p>
+<ul>
+<li>Create and manage your child's player account</li>
+<li>Let coaches assign drills</li>
+<li>Let your child mark drills complete</li>
+<li>Track points, streaks, levels, and team leaderboard standings</li>
+<li>Show coaches and club administrators team progress</li>
+<li>Provide support</li>
+<li>Protect the app and prevent misuse</li>
+<li>Improve the app using limited, aggregated, or de-identified information where possible</li>
+</ul>
+<p>Daily Reps does not sell your child's information. Daily Reps does not use your child's information for ads, targeted advertising, retargeting, marketing pixels, or unrelated marketing.</p>
+<h2>Who can see your child's information</h2>
+<p>Daily Reps is team-based.</p>
+<p>Your child's current teammates may see your child's first and last name, points, and team leaderboard standing.</p>
+<p>Your child's coaches may see your child's name, team assignment, assigned drills, completed drills, points, streaks, levels, and leaderboard standing.</p>
+<p>Club administrators may see player information for teams in their club.</p>
+<p>Daily Reps service providers may process limited information only as needed to host, secure, support, and operate the app. They are not allowed to sell your child's information or use it for their own advertising.</p>
+<h2>Parent/guardian rights</h2>
+<p>You may contact Daily Reps at any time to:</p>
+<ul>
+<li>Review the personal information we have about your child</li>
+<li>Correct inaccurate information</li>
+<li>Ask us to delete your child's information</li>
+<li>Revoke your consent</li>
+<li>Stop future collection or use of your child's information</li>
+</ul>
+<p>To make a request, contact us at privacy@mattmcwilliams.com.</p>
+<p>If you revoke consent or ask us to delete information needed to operate the account, your child may no longer be able to use Daily Reps.</p>
+<h2>Consent</h2>
+<p>By checking the box below, I confirm that:</p>
+<ol>
+<li>I am the parent or legal guardian of the child listed below.</li>
+<li>I have read this notice and the Daily Reps Privacy Policy.</li>
+<li>I give Daily Reps permission to collect, use, and share my child's limited account information as described above.</li>
+<li>I understand that my child's name, points, and leaderboard standing may be visible to current teammates, coaches, and club administrators.</li>
+<li>I understand that Daily Reps does not sell my child's information, does not show ads, does not use targeted advertising, and does not use marketing pixels in the player app.</li>
+<li>I understand that I can review, delete, or revoke consent for my child's information by contacting Daily Reps.</li>
+</ol>
+<p>[ ] I agree and give permission for my child to use Daily Reps.</p>`;
+
+  await pool.query(
+    `INSERT INTO app_settings (id, privacy_policy_version, privacy_policy_content, consent_language, retention_days)
+     VALUES (1, '1.0', $1, $2, 30)
+     ON CONFLICT (id) DO NOTHING`,
+    [policyContent, consentLanguage]
+  );
+  console.log('Seeded app_settings.');
 }
 
 async function migrateOldData() {
@@ -2368,6 +3623,8 @@ async function initDatabase() {
       console.log('New multi-tenant schema already exists, skipping migration.');
       // Ensure badges and levels are seeded
       await seedBadges();
+      await runBuild2Migrations();
+      await seedAppSettings();
       return;
     }
 
@@ -2417,6 +3674,8 @@ async function initDatabase() {
         // Seed data
         await seedBadges();
         await seedLevels();
+        await runBuild2Migrations();
+        await seedAppSettings();
 
         // Migrate data
         await migrateOldData();
@@ -2443,6 +3702,8 @@ async function initDatabase() {
     await pool.query(NEW_SCHEMA_SQL);
     await seedBadges();
     await seedLevels();
+    await runBuild2Migrations();
+    await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {
     console.error('Database init error:', err);
@@ -2450,12 +3711,83 @@ async function initDatabase() {
 }
 
 // ============================================================
+// RETENTION CRON JOB
+// ============================================================
+
+async function runRetentionJob() {
+  console.log('Running retention job...');
+  try {
+    const settings = await pool.query('SELECT retention_days FROM app_settings WHERE id = 1');
+    const retentionDays = settings.rows[0]?.retention_days || 30;
+
+    // Find players eligible for de-identification:
+    // 1. Inactive with deactivated_at older than retention_days
+    // 2. Any player with deletion_requested_at set
+    // Exclude already de-identified players
+    const eligible = await pool.query(
+      `SELECT id, first_name, last_name FROM players
+       WHERE ((status = 'inactive' AND deactivated_at IS NOT NULL AND deactivated_at < NOW() - INTERVAL '1 day' * $1)
+          OR deletion_requested_at IS NOT NULL)
+       AND first_name != 'Deleted'`,
+      [retentionDays]
+    );
+
+    for (const player of eligible.rows) {
+      const anonId = player.id.substring(0, 8);
+
+      // De-identify player: replace personal fields with anonymized placeholders
+      // Keep aggregate stats (completions, points, badges) for de-identified analysis
+      await pool.query(
+        `UPDATE players SET
+           first_name = 'Deleted',
+           last_name = $1,
+           username = $2,
+           player_email = NULL,
+           parent_email = NULL,
+           password_hash = 'DEIDENTIFIED'
+         WHERE id = $3`,
+        [anonId, `deleted_${anonId}`, player.id]
+      );
+
+      // Anonymize consent records
+      await pool.query(
+        `UPDATE consent_records SET parent_name = 'REDACTED', parent_email = 'REDACTED' WHERE player_id = $1`,
+        [player.id]
+      );
+
+      await auditLog('system', null, 'player_deleted', 'player', player.id,
+        { original_name: `${player.first_name} ${player.last_name}`, reason: 'retention_policy' });
+
+      console.log(`De-identified player ${player.id}`);
+    }
+
+    if (eligible.rows.length > 0) {
+      console.log(`Retention job: de-identified ${eligible.rows.length} players.`);
+    } else {
+      console.log('Retention job: no players to process.');
+    }
+  } catch (err) {
+    console.error('Retention job error:', err);
+  }
+}
+
+// Schedule: daily at 3:00 AM UTC
+cron.schedule('0 3 * * *', runRetentionJob);
+
+// ============================================================
 // START SERVER
 // ============================================================
 
 const PORT = process.env.PORT || 3001;
 
-initDatabase().then(() => {
+initDatabase().then(async () => {
+  // Process any queued emails on startup
+  try {
+    await processEmailQueue();
+  } catch (err) {
+    console.error('Email queue processing on startup failed:', err.message);
+  }
+
   app.listen(PORT, () => {
     console.log(`Daily Reps server running on port ${PORT}`);
   });

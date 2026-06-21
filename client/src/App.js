@@ -15,6 +15,9 @@ import AdminLeaderboard from './pages/admin/Leaderboard';
 import InviteCoach from './pages/admin/InviteCoach';
 import SuperAdmin from './pages/SuperAdmin';
 import ClubAdmin from './pages/ClubAdmin';
+import ConsentPage from './pages/ConsentPage';
+import ParentPortalRequest from './pages/ParentPortalRequest';
+import ParentPortal from './pages/ParentPortal';
 
 function StaffRoute({ children, roles }) {
   const { user, loading } = useAuth();
@@ -74,6 +77,9 @@ function AppRoutes() {
       </Route>
       <Route path="/super" element={<StaffRoute roles={['super_admin']}><SuperAdmin /></StaffRoute>} />
       <Route path="/club" element={<StaffRoute roles={['club_admin']}><ClubAdmin /></StaffRoute>} />
+      <Route path="/consent/:token" element={<ConsentPage />} />
+      <Route path="/parent-portal" element={<ParentPortalRequest />} />
+      <Route path="/parent-portal/:token" element={<ParentPortal />} />
       <Route path="*" element={<Navigate to="/login" />} />
     </Routes>
   );

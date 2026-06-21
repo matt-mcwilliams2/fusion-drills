@@ -55,6 +55,12 @@ export function AuthProvider({ children }) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Login failed');
+
+    // MFA flow: return data without setting token/user
+    if (data.mfa_required || data.mfa_setup_required) {
+      return data;
+    }
+
     localStorage.setItem('token', data.token);
     setToken(data.token);
     setUser(data.user);
@@ -65,7 +71,20 @@ export function AuthProvider({ children }) {
         localStorage.setItem('activeTeamId', data.teams[0].id);
       }
     }
-    return data.user;
+    return data;
+  };
+
+  const completeMfaLogin = (data) => {
+    localStorage.setItem('token', data.token);
+    setToken(data.token);
+    setUser(data.user);
+    if (data.teams) {
+      setTeams(data.teams);
+      if (data.teams.length > 0) {
+        setActiveTeamIdState(data.teams[0].id);
+        localStorage.setItem('activeTeamId', data.teams[0].id);
+      }
+    }
   };
 
   const loginPlayer = async (username, password, joinCode) => {
@@ -75,7 +94,7 @@ export function AuthProvider({ children }) {
       body: JSON.stringify({ username, password, join_code: joinCode }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Login failed');
+    if (!res.ok) throw new Error(data.message || data.error || 'Login failed');
     localStorage.setItem('token', data.token);
     setToken(data.token);
     setUser(data.user);
@@ -127,6 +146,7 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider value={{
       user, token, loading,
       loginStaff, loginPlayer, logout,
+      completeMfaLogin,
       apiFetch,
       teams, activeTeamId, activeTeam, setActiveTeam,
       teamInfo,

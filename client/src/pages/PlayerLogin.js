@@ -11,6 +11,7 @@ export default function PlayerLogin() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [consentMsg, setConsentMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [teamName, setTeamName] = useState('');
   const [teamColor, setTeamColor] = useState('#f77c00');
@@ -41,7 +42,12 @@ export default function PlayerLogin() {
     try {
       await loginPlayer(username, password, joinCode);
     } catch (err) {
-      setError(err.message);
+      if (err.message && err.message.toLowerCase().includes('parent') && err.message.toLowerCase().includes('consent')) {
+        setError('consent_blocked');
+        setConsentMsg(err.message);
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -72,8 +78,21 @@ export default function PlayerLogin() {
           {teamName}
         </div>
       )}
-      <form className="login-form" onSubmit={handleSubmit}>
-        {error && <div className="login-error">{error}</div>}
+      {error === 'consent_blocked' && (
+        <div style={{ textAlign: 'center', maxWidth: 400, marginBottom: 16 }}>
+          <div style={{ background: '#fff3cd', border: '1px solid #ffc107', padding: '16px 20px', borderRadius: 8, color: '#856404', fontSize: '0.95em', lineHeight: 1.5 }}>
+            {consentMsg}
+          </div>
+          <button
+            onClick={() => { setError(''); setConsentMsg(''); }}
+            style={{ background: 'none', border: 'none', color: teamColor, cursor: 'pointer', marginTop: 12, fontSize: '0.9em' }}
+          >
+            Try again
+          </button>
+        </div>
+      )}
+      <form className="login-form" onSubmit={handleSubmit} style={{ display: error === 'consent_blocked' ? 'none' : undefined }}>
+        {error && error !== 'consent_blocked' && <div className="login-error">{error}</div>}
         <input
           type="text"
           placeholder="Username"
