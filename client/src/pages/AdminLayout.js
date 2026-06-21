@@ -71,7 +71,7 @@ export default function AdminLayout() {
           color: 'var(--text-muted)',
           textAlign: 'center',
         }}>
-          Player join link: <strong style={{ color: 'var(--orange)' }}>/t/{activeTeam.join_code}</strong>
+          Player join link: <a href={`${window.location.origin}/t/${activeTeam.join_code}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--orange)', fontWeight: 700 }}>{window.location.origin}/t/{activeTeam.join_code}</a>
         </div>
       )}
       <Outlet />
