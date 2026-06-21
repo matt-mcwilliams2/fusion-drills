@@ -4271,6 +4271,66 @@ async function runBuild2Migrations() {
     console.log('Added deletion_requested_at column to players.');
   }
 
+  // Create Build 2 tables that may not exist on databases created before Build 2
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      privacy_policy_version VARCHAR(20) DEFAULT '1.0',
+      privacy_policy_content TEXT,
+      consent_language TEXT DEFAULT 'I consent to my child participating in Daily Reps.',
+      retention_days INTEGER DEFAULT 30
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pending_emails (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      to_email VARCHAR(255) NOT NULL,
+      subject VARCHAR(500) NOT NULL,
+      html_body TEXT NOT NULL,
+      status VARCHAR(20) DEFAULT 'pending',
+      attempts INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      sent_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_pending_emails_status ON pending_emails(status)');
+
+  // Create consent and audit tables if not exists
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS consent_records (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+      parent_email VARCHAR(255),
+      parent_name VARCHAR(255),
+      consent_given BOOLEAN DEFAULT FALSE,
+      consent_method VARCHAR(50),
+      privacy_policy_version VARCHAR(20),
+      ip_address VARCHAR(45),
+      user_agent TEXT,
+      token TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      responded_at TIMESTAMPTZ
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      action VARCHAR(100) NOT NULL,
+      actor_id UUID,
+      actor_role VARCHAR(20),
+      target_type VARCHAR(50),
+      target_id UUID,
+      team_id UUID REFERENCES teams(id),
+      club_id UUID REFERENCES clubs(id),
+      details JSONB,
+      ip_address VARCHAR(45),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   console.log('Build 2 migrations complete.');
 }
 
