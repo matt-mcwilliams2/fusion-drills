@@ -179,6 +179,27 @@ async function requireTeamAccess(req, res, next) {
   }
 }
 
+// Club-scoped access for club_admin and super_admin (no x-team-id needed)
+async function requireClubAccess(req, res, next) {
+  try {
+    if (req.role === 'super_admin') {
+      req.clubId = req.headers['x-club-id'] || null;
+      return next();
+    }
+    if (req.role === 'club_admin') {
+      if (!req.user.club_id) {
+        return res.status(403).json({ error: 'No club assigned' });
+      }
+      req.clubId = req.user.club_id;
+      return next();
+    }
+    return res.status(403).json({ error: 'Club access required' });
+  } catch (err) {
+    console.error('Club access check error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+}
+
 // ============================================================
 // EMAIL SERVICE
 // ============================================================
@@ -389,6 +410,71 @@ async function sendConsentEmail(player, teamName, parentEmail) {
   `;
 
   await sendEmail(parentEmail, `Daily Reps: Consent required for ${player.first_name}`, emailHtml);
+}
+
+// ============================================================
+// INVITATION TOKENS
+// ============================================================
+
+const INVITATION_SECRET = JWT_SECRET + '-invitation';
+
+function generateInvitationToken(invitationId, email, role) {
+  return jwt.sign(
+    { invitation_id: invitationId, email, role, purpose: 'invitation' },
+    INVITATION_SECRET,
+    { expiresIn: '48h' }
+  );
+}
+
+function verifyInvitationToken(token) {
+  try {
+    const decoded = jwt.verify(token, INVITATION_SECRET);
+    if (decoded.purpose !== 'invitation') return null;
+    return decoded;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function sendInvitationEmail(email, role, clubName, inviterName, token) {
+  const acceptUrl = `${APP_URL}/invite/${token}`;
+  const roleName = role === 'club_admin' ? 'Club Administrator' : 'Coach';
+  const emailHtml = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #222;">
+      <h2 style="color: #1348e5;">Daily Reps &mdash; You've Been Invited</h2>
+      <p>Hello,</p>
+      <p><strong>${inviterName}</strong> has invited you to join <strong>${clubName}</strong> as a <strong>${roleName}</strong> on Daily Reps.</p>
+      <p style="text-align: center; margin: 24px 0;">
+        <a href="${acceptUrl}" style="display: inline-block; padding: 14px 28px; background: #1348e5; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+          Accept Invitation
+        </a>
+      </p>
+      <p style="font-size: 0.85em; color: #666;">This link expires in 48 hours.</p>
+    </div>
+  `;
+  await sendEmail(email, `Daily Reps: You've been invited to ${clubName}`, emailHtml);
+}
+
+// ============================================================
+// USERNAME & PASSWORD GENERATION
+// ============================================================
+
+function generateUsername(firstName, lastName, existingUsernames) {
+  const base = (firstName.toLowerCase() + lastName.charAt(0).toLowerCase()).replace(/[^a-z0-9]/g, '');
+  if (!base) return 'player1';
+  if (!existingUsernames.has(base)) return base;
+  let counter = 2;
+  while (existingUsernames.has(base + counter)) counter++;
+  return base + counter;
+}
+
+function generatePlayerPassword() {
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 8; i++) {
+    pw += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return pw;
 }
 
 // ============================================================
@@ -945,6 +1031,16 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
          WHERE ct.user_id = $1 AND t.status = 'active'
          ORDER BY t.name`,
         [u.id]
+      );
+      teams = teamsResult.rows;
+    }
+
+    // Club admin: return all teams in their club (for team switcher on admin pages)
+    if (u.role === 'club_admin' && u.club_id) {
+      const teamsResult = await pool.query(
+        `SELECT t.id, t.name, t.join_code, t.primary_color, t.logo_url, t.age_group, t.has_under_13
+         FROM teams t WHERE t.club_id = $1 AND t.status = 'active' ORDER BY t.name`,
+        [u.club_id]
       );
       teams = teamsResult.rows;
     }
@@ -1994,9 +2090,17 @@ app.get('/api/admin/seasons', authenticate, requireRole('coach', 'super_admin', 
 
 app.post('/api/admin/seasons', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
   try {
-    const { name, start_date, end_date } = req.body;
-    if (!name || !start_date || !end_date) {
-      return res.status(400).json({ error: 'Name, start_date, and end_date are required' });
+    const { name, start_date } = req.body;
+    let { end_date } = req.body;
+    if (!name || !start_date) {
+      return res.status(400).json({ error: 'Name and start_date are required' });
+    }
+
+    // Default end_date to ~11 months after start if not provided
+    if (!end_date) {
+      const start = new Date(start_date);
+      start.setMonth(start.getMonth() + 11);
+      end_date = start.toISOString().split('T')[0];
     }
 
     const result = await pool.query(
@@ -2037,9 +2141,9 @@ app.put('/api/admin/seasons/:id', authenticate, requireRole('coach', 'super_admi
 
 app.put('/api/admin/seasons/:id/activate', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
   try {
-    // Deactivate all seasons for this team
+    // Archive all seasons for this team (any previously active one)
     await pool.query(
-      "UPDATE seasons SET status = 'archived' WHERE team_id = $1",
+      "UPDATE seasons SET status = 'archived' WHERE team_id = $1 AND status = 'active'",
       [req.teamId]
     );
 
@@ -2056,6 +2160,20 @@ app.put('/api/admin/seasons/:id/activate', authenticate, requireRole('coach', 's
       'UPDATE teams SET active_season_id = $1 WHERE id = $2',
       [req.params.id, req.teamId]
     );
+
+    // Create fresh player_season_stats for all active players on this team
+    const activePlayers = await pool.query(
+      "SELECT id FROM players WHERE team_id = $1 AND status = 'active'",
+      [req.teamId]
+    );
+    for (const player of activePlayers.rows) {
+      await pool.query(
+        `INSERT INTO player_season_stats (player_id, season_id, season_points, current_streak, longest_streak)
+         VALUES ($1, $2, 0, 0, 0)
+         ON CONFLICT (player_id, season_id) DO NOTHING`,
+        [player.id, req.params.id]
+      );
+    }
 
     res.json({ ...result.rows[0], active: true });
   } catch (err) {
@@ -2087,48 +2205,52 @@ app.delete('/api/admin/seasons/:id', authenticate, requireRole('coach', 'super_a
 
 // --- Coaches ---
 
-app.post('/api/admin/coaches', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
+app.post('/api/admin/coaches', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
   try {
-    const { first_name, last_name, email, password } = req.body;
-    if (!first_name || !last_name || !email || !password) {
-      return res.status(400).json({ error: 'All fields are required' });
+    const { first_name, last_name, email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
     }
-
-    const pwError = validateStaffPassword(password);
-    if (pwError) return res.status(400).json({ error: pwError });
-
-    const passwordHash = await bcrypt.hash(password, 10);
 
     // Check if user with this email already exists
-    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+    const existing = await pool.query('SELECT id, first_name, last_name FROM users WHERE email = $1', [email.toLowerCase().trim()]);
 
-    let userId;
     if (existing.rows.length > 0) {
-      userId = existing.rows[0].id;
-    } else {
-      const result = await pool.query(
-        `INSERT INTO users (email, password_hash, role, first_name, last_name, status)
-         VALUES ($1, $2, 'coach', $3, $4, 'active')
-         RETURNING id, email, first_name, last_name, role, status, created_at`,
-        [email.toLowerCase().trim(), passwordHash, first_name, last_name]
+      // Link existing user to team
+      await pool.query(
+        'INSERT INTO coach_teams (user_id, team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [existing.rows[0].id, req.teamId]
       );
-      userId = result.rows[0].id;
+      const coach = await pool.query('SELECT id, email, first_name, last_name, role, status, created_at FROM users WHERE id = $1', [existing.rows[0].id]);
+      return res.status(201).json({ coach: coach.rows[0], linked: true });
     }
 
-    // Link coach to team
-    await pool.query(
-      'INSERT INTO coach_teams (user_id, team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [userId, req.teamId]
+    // Create invitation for new coach
+    // Get the team's club_id for the invitation
+    const teamResult = await pool.query('SELECT club_id, name FROM teams WHERE id = $1', [req.teamId]);
+    const clubId = teamResult.rows[0]?.club_id;
+
+    const invResult = await pool.query(
+      `INSERT INTO invitations (email, role, club_id, team_id, token, invited_by)
+       VALUES ($1, 'coach', $2, $3, 'placeholder', $4) RETURNING id`,
+      [email.toLowerCase().trim(), clubId, req.teamId, req.user.id]
     );
+    const invId = invResult.rows[0].id;
+    const token = generateInvitationToken(invId, email.toLowerCase().trim(), 'coach');
+    await pool.query('UPDATE invitations SET token = $1 WHERE id = $2', [token, invId]);
 
-    const coach = await pool.query('SELECT id, email, first_name, last_name, role, status, created_at FROM users WHERE id = $1', [userId]);
+    // Send invitation email
+    const clubResult = clubId ? await pool.query('SELECT name FROM clubs WHERE id = $1', [clubId]) : { rows: [{ name: teamResult.rows[0]?.name || 'Daily Reps' }] };
+    const clubName = clubResult.rows[0]?.name || 'Daily Reps';
+    const inviterName = `${req.user.first_name} ${req.user.last_name}`;
+    await sendInvitationEmail(email.toLowerCase().trim(), 'coach', clubName, inviterName, token);
 
-    res.status(201).json({ coach: coach.rows[0] });
+    await auditLog('staff', req.user.id, 'invitation_sent', 'invitation', invId,
+      { email, role: 'coach' }, req);
+
+    res.status(201).json({ invitation_sent: true, email });
   } catch (err) {
-    if (err.code === '23505') {
-      return res.status(409).json({ error: 'Email already exists' });
-    }
-    console.error('Create coach error:', err);
+    console.error('Invite coach error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -2885,6 +3007,921 @@ app.get('/api/privacy-policy', async (req, res) => {
 });
 
 // ============================================================
+// SUPER ADMIN ENDPOINTS
+// ============================================================
+
+// List all clubs
+app.get('/api/super/clubs', authenticate, requireRole('super_admin'), async (req, res) => {
+  try {
+    const clubs = await pool.query(`
+      SELECT c.*,
+        (SELECT COUNT(*) FROM teams t WHERE t.club_id = c.id AND t.status = 'active') as team_count,
+        (SELECT COUNT(*) FROM players p JOIN teams t ON t.id = p.team_id WHERE t.club_id = c.id AND p.status != 'inactive') as player_count
+      FROM clubs c ORDER BY c.created_at DESC
+    `);
+    res.json({ clubs: clubs.rows });
+  } catch (err) {
+    console.error('List clubs error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create club + invite club admin
+app.post('/api/super/clubs', authenticate, requireRole('super_admin'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { club_name, admin_email, admin_first_name, admin_last_name } = req.body;
+    if (!club_name || !admin_email || !admin_first_name || !admin_last_name) {
+      return res.status(400).json({ error: 'Club name, admin email, first name, and last name are required' });
+    }
+
+    await client.query('BEGIN');
+
+    // Check if email already in use
+    const existingUser = await client.query('SELECT id FROM users WHERE email = $1', [admin_email.toLowerCase().trim()]);
+    if (existingUser.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'A user with that email already exists' });
+    }
+
+    // Create club
+    const clubResult = await client.query(
+      "INSERT INTO clubs (name, status) VALUES ($1, 'active') RETURNING *",
+      [club_name]
+    );
+    const club = clubResult.rows[0];
+
+    // Create invitation
+    const invResult = await client.query(
+      `INSERT INTO invitations (email, role, club_id, token, invited_by)
+       VALUES ($1, 'club_admin', $2, 'placeholder', $3) RETURNING id`,
+      [admin_email.toLowerCase().trim(), club.id, req.user.id]
+    );
+    const invId = invResult.rows[0].id;
+    const token = generateInvitationToken(invId, admin_email.toLowerCase().trim(), 'club_admin');
+    await client.query('UPDATE invitations SET token = $1 WHERE id = $2', [token, invId]);
+
+    await client.query('COMMIT');
+
+    // Send invitation email
+    const inviterName = `${req.user.first_name} ${req.user.last_name}`;
+    await sendInvitationEmail(admin_email.toLowerCase().trim(), 'club_admin', club_name, inviterName, token);
+
+    await auditLog('staff', req.user.id, 'club_created', 'club', club.id, { club_name }, req);
+    await auditLog('staff', req.user.id, 'invitation_sent', 'invitation', invId,
+      { email: admin_email, role: 'club_admin' }, req);
+
+    res.status(201).json({ club, invitation_sent: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Create club error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================
+// INVITATION ACCEPT ENDPOINTS (public, unauthenticated)
+// ============================================================
+
+// Validate invitation token
+app.get('/api/invitations/:token/validate', async (req, res) => {
+  try {
+    const decoded = verifyInvitationToken(req.params.token);
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired invitation link' });
+
+    const inv = await pool.query(
+      'SELECT i.*, c.name as club_name, t.name as team_name FROM invitations i LEFT JOIN clubs c ON c.id = i.club_id LEFT JOIN teams t ON t.id = i.team_id WHERE i.id = $1',
+      [decoded.invitation_id]
+    );
+    if (inv.rows.length === 0) return res.status(404).json({ error: 'Invitation not found' });
+    const invitation = inv.rows[0];
+    if (invitation.status !== 'pending') {
+      return res.status(400).json({ error: invitation.status === 'accepted' ? 'This invitation has already been accepted' : 'This invitation has expired' });
+    }
+
+    res.json({
+      email: invitation.email,
+      role: invitation.role,
+      club_name: invitation.club_name,
+      team_name: invitation.team_name,
+    });
+  } catch (err) {
+    console.error('Validate invitation error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Accept invitation: set password, create user
+app.post('/api/invitations/:token/accept', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const decoded = verifyInvitationToken(req.params.token);
+    if (!decoded) return res.status(400).json({ error: 'Invalid or expired invitation link' });
+
+    const inv = await client.query('SELECT * FROM invitations WHERE id = $1', [decoded.invitation_id]);
+    if (inv.rows.length === 0) return res.status(404).json({ error: 'Invitation not found' });
+    const invitation = inv.rows[0];
+    if (invitation.status !== 'pending') {
+      return res.status(400).json({ error: 'This invitation has already been used or expired' });
+    }
+
+    const { password, first_name, last_name } = req.body;
+    if (!password || !first_name || !last_name) {
+      return res.status(400).json({ error: 'Password, first name, and last name are required' });
+    }
+
+    const pwError = validateStaffPassword(password);
+    if (pwError) return res.status(400).json({ error: pwError });
+
+    await client.query('BEGIN');
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Check if user with this email already exists
+    const existing = await client.query('SELECT id, role FROM users WHERE email = $1', [invitation.email]);
+    let userId;
+    if (existing.rows.length > 0) {
+      userId = existing.rows[0].id;
+      // Update the user's club_id if they're being made a club_admin
+      if (invitation.role === 'club_admin') {
+        await client.query('UPDATE users SET club_id = $1, role = $2 WHERE id = $3',
+          [invitation.club_id, invitation.role, userId]);
+      }
+    } else {
+      const userResult = await client.query(
+        `INSERT INTO users (email, password_hash, role, first_name, last_name, club_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'active') RETURNING id`,
+        [invitation.email, passwordHash, invitation.role, first_name, last_name, invitation.club_id || null]
+      );
+      userId = userResult.rows[0].id;
+    }
+
+    // Link to team if team_id present (coach invitation)
+    if (invitation.team_id) {
+      await client.query(
+        'INSERT INTO coach_teams (user_id, team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [userId, invitation.team_id]
+      );
+    }
+
+    // Mark invitation as accepted
+    await client.query(
+      "UPDATE invitations SET status = 'accepted', accepted_at = NOW() WHERE id = $1",
+      [invitation.id]
+    );
+
+    await client.query('COMMIT');
+
+    await auditLog('staff', userId, 'invitation_accepted', 'user', userId,
+      { role: invitation.role, invitation_id: invitation.id }, req);
+
+    // For club_admin: require MFA setup
+    if (invitation.role === 'club_admin') {
+      const setupToken = jwt.sign(
+        { id: userId, email: invitation.email, role: invitation.role, first_name, last_name, club_id: invitation.club_id, purpose: 'mfa_setup' },
+        JWT_SECRET,
+        { expiresIn: '15m' }
+      );
+      return res.json({ mfa_setup_required: true, token: setupToken });
+    }
+
+    // For coach: issue full token
+    const user = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+    const u = user.rows[0];
+    const teamsResult = await pool.query(
+      `SELECT t.id, t.name, t.join_code, t.primary_color, t.logo_url
+       FROM teams t JOIN coach_teams ct ON ct.team_id = t.id
+       WHERE ct.user_id = $1 AND t.status = 'active' ORDER BY t.name`,
+      [userId]
+    );
+    const token = jwt.sign(
+      { id: u.id, email: u.email, role: u.role, first_name: u.first_name, last_name: u.last_name, club_id: u.club_id },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    res.json({
+      token,
+      user: { id: u.id, email: u.email, role: u.role, first_name: u.first_name, last_name: u.last_name, club_id: u.club_id },
+      teams: teamsResult.rows,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Accept invitation error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================
+// CLUB ADMIN ENDPOINTS
+// ============================================================
+
+// Dashboard data
+app.get('/api/club/dashboard', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  try {
+    // Club info
+    const clubResult = await pool.query('SELECT * FROM clubs WHERE id = $1', [req.clubId]);
+    if (clubResult.rows.length === 0) return res.status(404).json({ error: 'Club not found' });
+    const club = clubResult.rows[0];
+
+    // Teams with enriched data
+    const teamsResult = await pool.query(`
+      SELECT t.id, t.name, t.age_group, t.has_under_13, t.join_code, t.status, t.active_season_id,
+        (SELECT COUNT(*) FROM players p WHERE p.team_id = t.id AND p.status != 'inactive') as player_count,
+        (SELECT s.name FROM seasons s WHERE s.id = t.active_season_id) as active_season_name,
+        (SELECT json_agg(json_build_object('id', u.id, 'first_name', u.first_name, 'last_name', u.last_name, 'email', u.email))
+         FROM users u JOIN coach_teams ct ON ct.user_id = u.id WHERE ct.team_id = t.id) as coaches
+      FROM teams t WHERE t.club_id = $1 AND t.status = 'active' ORDER BY t.name
+    `, [req.clubId]);
+
+    // Total player count
+    const countResult = await pool.query(
+      "SELECT COUNT(*) as total FROM players p JOIN teams t ON t.id = p.team_id WHERE t.club_id = $1 AND p.status != 'inactive'",
+      [req.clubId]
+    );
+
+    // Pending invitations
+    const invitations = await pool.query(
+      "SELECT i.*, t.name as team_name FROM invitations i LEFT JOIN teams t ON t.id = i.team_id WHERE i.club_id = $1 AND i.status = 'pending' ORDER BY i.created_at DESC",
+      [req.clubId]
+    );
+
+    res.json({
+      club: { id: club.id, name: club.name, status: club.status, player_limit: club.player_limit },
+      teams: teamsResult.rows,
+      total_players: parseInt(countResult.rows[0].total),
+      invitations: invitations.rows,
+    });
+  } catch (err) {
+    console.error('Club dashboard error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// List coaches in club
+app.get('/api/club/coaches', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT u.id, u.first_name, u.last_name, u.email
+       FROM users u
+       JOIN coach_teams ct ON ct.user_id = u.id
+       JOIN teams t ON t.id = ct.team_id
+       WHERE t.club_id = $1 AND u.status = 'active'
+       ORDER BY u.last_name`,
+      [req.clubId]
+    );
+    res.json({ coaches: result.rows });
+  } catch (err) {
+    console.error('List club coaches error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create team
+app.post('/api/club/teams', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { name, age_group, has_under_13, coach_ids } = req.body;
+    if (!name) return res.status(400).json({ error: 'Team name is required' });
+
+    await client.query('BEGIN');
+
+    // Generate unique join code
+    let joinCode;
+    for (let attempts = 0; attempts < 10; attempts++) {
+      joinCode = generateJoinCode();
+      const existing = await client.query('SELECT id FROM teams WHERE join_code = $1', [joinCode]);
+      if (existing.rows.length === 0) break;
+    }
+
+    const teamResult = await client.query(
+      `INSERT INTO teams (club_id, name, age_group, has_under_13, join_code, status)
+       VALUES ($1, $2, $3, $4, $5, 'active') RETURNING *`,
+      [req.clubId, name, age_group || null, has_under_13 === true ? true : (has_under_13 === false ? false : null), joinCode]
+    );
+    const team = teamResult.rows[0];
+
+    // Assign coaches if provided
+    if (coach_ids && Array.isArray(coach_ids)) {
+      for (const coachId of coach_ids) {
+        // Validate coach belongs to club
+        const coachCheck = await client.query(
+          `SELECT u.id FROM users u
+           JOIN coach_teams ct ON ct.user_id = u.id
+           JOIN teams t ON t.id = ct.team_id
+           WHERE u.id = $1 AND t.club_id = $2
+           UNION
+           SELECT id FROM users WHERE id = $1 AND club_id = $2 AND role = 'coach'`,
+          [coachId, req.clubId]
+        );
+        if (coachCheck.rows.length > 0) {
+          await client.query(
+            'INSERT INTO coach_teams (user_id, team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+            [coachId, team.id]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    await auditLog('staff', req.user.id, 'team_created', 'team', team.id,
+      { name, age_group, has_under_13 }, req);
+
+    res.status(201).json({ team });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Create team error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Invite coach to club/team
+app.post('/api/club/invitations', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  try {
+    const { email, team_id, first_name, last_name } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    // If team_id is provided, validate it belongs to the club
+    if (team_id) {
+      const teamCheck = await pool.query('SELECT id FROM teams WHERE id = $1 AND club_id = $2', [team_id, req.clubId]);
+      if (teamCheck.rows.length === 0) return res.status(400).json({ error: 'Team not found in your club' });
+    }
+
+    // Check if user already exists
+    const existing = await pool.query('SELECT id, role, first_name, last_name FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+    if (existing.rows.length > 0) {
+      // Link to team if team_id provided
+      if (team_id) {
+        await pool.query(
+          'INSERT INTO coach_teams (user_id, team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [existing.rows[0].id, team_id]
+        );
+      }
+      return res.json({
+        coach: existing.rows[0],
+        linked: true,
+        message: `${existing.rows[0].first_name} ${existing.rows[0].last_name} has been added to the team.`,
+      });
+    }
+
+    // Create invitation
+    const invResult = await pool.query(
+      `INSERT INTO invitations (email, role, club_id, team_id, token, invited_by)
+       VALUES ($1, 'coach', $2, $3, 'placeholder', $4) RETURNING id`,
+      [email.toLowerCase().trim(), req.clubId, team_id || null, req.user.id]
+    );
+    const invId = invResult.rows[0].id;
+    const token = generateInvitationToken(invId, email.toLowerCase().trim(), 'coach');
+    await pool.query('UPDATE invitations SET token = $1 WHERE id = $2', [token, invId]);
+
+    // Get club name for email
+    const clubResult = await pool.query('SELECT name FROM clubs WHERE id = $1', [req.clubId]);
+    const clubName = clubResult.rows[0]?.name || 'your club';
+    const inviterName = `${req.user.first_name} ${req.user.last_name}`;
+    await sendInvitationEmail(email.toLowerCase().trim(), 'coach', clubName, inviterName, token);
+
+    await auditLog('staff', req.user.id, 'invitation_sent', 'invitation', invId,
+      { email, role: 'coach', team_id }, req);
+
+    res.status(201).json({ invitation_sent: true, email });
+  } catch (err) {
+    console.error('Club invite error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Move player between teams
+app.post('/api/club/players/:id/move', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { destination_team_id } = req.body;
+    if (!destination_team_id) return res.status(400).json({ error: 'Destination team ID is required' });
+
+    await client.query('BEGIN');
+
+    // Load player, verify belongs to club
+    const playerResult = await client.query(
+      `SELECT p.*, t.club_id, t.name as source_team_name
+       FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1`,
+      [req.params.id]
+    );
+    if (playerResult.rows.length === 0 || playerResult.rows[0].club_id !== req.clubId) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Player not found in your club' });
+    }
+    const player = playerResult.rows[0];
+
+    if (player.team_id === destination_team_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Player is already on that team' });
+    }
+
+    // Verify destination team belongs to club
+    const destTeam = await client.query(
+      'SELECT * FROM teams WHERE id = $1 AND club_id = $2',
+      [destination_team_id, req.clubId]
+    );
+    if (destTeam.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Destination team not in your club' });
+    }
+
+    // Username dedup check
+    const usernameCheck = await client.query(
+      'SELECT id FROM players WHERE team_id = $1 AND username = $2',
+      [destination_team_id, player.username]
+    );
+    let newUsername = player.username;
+    if (usernameCheck.rows.length > 0) {
+      let counter = 2;
+      while (true) {
+        const check = await client.query(
+          'SELECT id FROM players WHERE team_id = $1 AND username = $2',
+          [destination_team_id, player.username + counter]
+        );
+        if (check.rows.length === 0) { newUsername = player.username + counter; break; }
+        counter++;
+      }
+    }
+
+    // Update player's team_id and username
+    await client.query(
+      'UPDATE players SET team_id = $1, username = $2 WHERE id = $3',
+      [destination_team_id, newUsername, req.params.id]
+    );
+
+    // Consent re-check
+    if (destTeam.rows[0].has_under_13 && player.consent_status !== 'granted') {
+      await client.query(
+        "UPDATE players SET status = 'pending', consent_status = 'awaiting' WHERE id = $1",
+        [req.params.id]
+      );
+      if (player.parent_email) {
+        await sendConsentEmail(
+          { id: player.id, first_name: player.first_name, last_name: player.last_name },
+          destTeam.rows[0].name,
+          player.parent_email
+        );
+      }
+    } else if (!destTeam.rows[0].has_under_13) {
+      // Non-under-13 destination: ensure player is active
+      await client.query(
+        "UPDATE players SET status = 'active', consent_status = 'not_required' WHERE id = $1 AND status = 'pending'",
+        [req.params.id]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    await auditLog('staff', req.user.id, 'player_moved', 'player', req.params.id,
+      { from_team_id: player.team_id, from_team_name: player.source_team_name,
+        to_team_id: destination_team_id, to_team_name: destTeam.rows[0].name,
+        old_username: player.username, new_username: newUsername }, req);
+
+    res.json({ message: 'Player moved successfully', new_username: newUsername });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Move player error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Bulk team import (club admin)
+app.post('/api/club/import', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { rows, preview } = req.body;
+    if (!rows || !Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: 'No rows provided' });
+    }
+
+    // Validation pass
+    const errors = [];
+    const teamMap = new Map(); // team_name -> { under_13, rows }
+    const coachEmails = new Set();
+    const playerEntries = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 1;
+      const { team_name, under_13, type, first_name, last_name, email } = row;
+
+      if (!team_name || !type || !first_name || !last_name) {
+        errors.push({ row: rowNum, error: 'Missing required fields (team_name, type, first_name, last_name)' });
+        continue;
+      }
+
+      const normType = type.toLowerCase().trim();
+      if (normType !== 'coach' && normType !== 'player') {
+        errors.push({ row: rowNum, error: `Type must be "Coach" or "Player", got "${type}"` });
+        continue;
+      }
+
+      // Track team settings
+      const normUnder13 = under_13 && under_13.toString().toLowerCase().trim();
+      const isUnder13 = normUnder13 === 'yes' || normUnder13 === 'true' || normUnder13 === 'y';
+      if (!teamMap.has(team_name)) {
+        teamMap.set(team_name, { under_13: isUnder13, firstRow: rowNum });
+      } else {
+        const existing = teamMap.get(team_name);
+        if (existing.under_13 !== isUnder13 && normUnder13 && normUnder13 !== '') {
+          errors.push({ row: rowNum, warning: `Under-13 value conflicts with row ${existing.firstRow} for team "${team_name}". Using value from first row.` });
+        }
+      }
+
+      if (normType === 'coach') {
+        if (!email) {
+          errors.push({ row: rowNum, error: 'Email is required for coach rows' });
+          continue;
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          errors.push({ row: rowNum, error: `Invalid email: ${email}` });
+          continue;
+        }
+        coachEmails.add(email.toLowerCase().trim());
+      }
+
+      if (normType === 'player') {
+        const teamInfo = teamMap.get(team_name);
+        if (teamInfo.under_13 && !email) {
+          errors.push({ row: rowNum, warning: 'Missing parent email for under-13 team player. Player will be created with consent status "awaiting".' });
+        }
+      }
+    }
+
+    // Check for existing teams in club
+    const existingTeams = await pool.query(
+      'SELECT name FROM teams WHERE club_id = $1', [req.clubId]
+    );
+    const existingTeamNames = new Set(existingTeams.rows.map(t => t.name.toLowerCase()));
+    const newTeams = [...teamMap.keys()].filter(name => !existingTeamNames.has(name.toLowerCase()));
+
+    const summary = {
+      teams_to_create: newTeams.length,
+      teams_existing: teamMap.size - newTeams.length,
+      coaches: coachEmails.size,
+      players: rows.filter(r => r.type && r.type.toLowerCase().trim() === 'player').length,
+      errors: errors.filter(e => e.error),
+      warnings: errors.filter(e => e.warning),
+    };
+
+    if (preview) {
+      return res.json({ preview: true, summary, errors });
+    }
+
+    // Commit pass — only if no hard errors
+    if (summary.errors.length > 0) {
+      return res.status(400).json({ error: 'Fix validation errors before importing', summary, errors });
+    }
+
+    await client.query('BEGIN');
+
+    // Create or find teams
+    const teamIdMap = new Map(); // team_name -> team_id
+    for (const [teamName, info] of teamMap.entries()) {
+      const existing = await client.query(
+        'SELECT id FROM teams WHERE club_id = $1 AND LOWER(name) = LOWER($2)',
+        [req.clubId, teamName]
+      );
+      if (existing.rows.length > 0) {
+        teamIdMap.set(teamName, existing.rows[0].id);
+      } else {
+        let joinCode;
+        for (let a = 0; a < 10; a++) {
+          joinCode = generateJoinCode();
+          const jcCheck = await client.query('SELECT id FROM teams WHERE join_code = $1', [joinCode]);
+          if (jcCheck.rows.length === 0) break;
+        }
+        const teamResult = await client.query(
+          `INSERT INTO teams (club_id, name, has_under_13, join_code, status)
+           VALUES ($1, $2, $3, $4, 'active') RETURNING id`,
+          [req.clubId, teamName, info.under_13 || false, joinCode]
+        );
+        teamIdMap.set(teamName, teamResult.rows[0].id);
+      }
+    }
+
+    // Process coaches
+    const coachResults = [];
+    const processedCoachEmails = new Set();
+    for (const row of rows) {
+      if (!row.type || row.type.toLowerCase().trim() !== 'coach' || !row.email) continue;
+      const email = row.email.toLowerCase().trim();
+      if (processedCoachEmails.has(email)) continue;
+      processedCoachEmails.add(email);
+
+      const teamId = teamIdMap.get(row.team_name);
+      const existing = await client.query('SELECT id, first_name, last_name FROM users WHERE email = $1', [email]);
+
+      if (existing.rows.length > 0) {
+        // Link existing user to team
+        await client.query(
+          'INSERT INTO coach_teams (user_id, team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [existing.rows[0].id, teamId]
+        );
+        coachResults.push({ email, status: 'linked', name: `${existing.rows[0].first_name} ${existing.rows[0].last_name}` });
+      } else {
+        // Create invitation
+        const invResult = await client.query(
+          `INSERT INTO invitations (email, role, club_id, team_id, token, invited_by)
+           VALUES ($1, 'coach', $2, $3, 'placeholder', $4) RETURNING id`,
+          [email, req.clubId, teamId, req.user.id]
+        );
+        const invId = invResult.rows[0].id;
+        const token = generateInvitationToken(invId, email, 'coach');
+        await client.query('UPDATE invitations SET token = $1 WHERE id = $2', [token, invId]);
+
+        const clubResult = await client.query('SELECT name FROM clubs WHERE id = $1', [req.clubId]);
+        const clubName = clubResult.rows[0]?.name || 'your club';
+        const inviterName = `${req.user.first_name} ${req.user.last_name}`;
+        await sendInvitationEmail(email, 'coach', clubName, inviterName, token);
+
+        coachResults.push({ email, status: 'invited', name: `${row.first_name} ${row.last_name}` });
+      }
+    }
+
+    // Process players
+    const credentials = [];
+    // Get existing usernames per team
+    const teamUsernames = new Map();
+    for (const [teamName, teamId] of teamIdMap.entries()) {
+      const existing = await client.query('SELECT username FROM players WHERE team_id = $1', [teamId]);
+      teamUsernames.set(teamId, new Set(existing.rows.map(p => p.username)));
+    }
+
+    for (const row of rows) {
+      if (!row.type || row.type.toLowerCase().trim() !== 'player') continue;
+
+      const teamId = teamIdMap.get(row.team_name);
+      const teamInfo = teamMap.get(row.team_name);
+      const usernameSet = teamUsernames.get(teamId);
+
+      const username = generateUsername(row.first_name, row.last_name, usernameSet);
+      usernameSet.add(username);
+      const tempPassword = generatePlayerPassword();
+      const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+      const requiresConsent = teamInfo.under_13;
+      const playerStatus = requiresConsent ? 'pending' : 'active';
+      const consentStatus = requiresConsent ? 'awaiting' : 'not_required';
+      const parentEmail = row.email ? row.email.trim() : null;
+
+      const playerResult = await client.query(
+        `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [teamId, row.first_name, row.last_name, username, passwordHash, playerStatus, consentStatus, parentEmail]
+      );
+
+      credentials.push({
+        team_name: row.team_name,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        username,
+        password: tempPassword,
+      });
+
+      // Send consent email if under-13 and parent email
+      if (requiresConsent && parentEmail) {
+        await sendConsentEmail(
+          { id: playerResult.rows[0].id, first_name: row.first_name, last_name: row.last_name },
+          row.team_name,
+          parentEmail
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    await auditLog('staff', req.user.id, 'bulk_import', 'club', req.clubId,
+      { teams_created: newTeams.length, coaches: coachResults.length, players: credentials.length }, req);
+
+    res.json({
+      summary: {
+        teams_created: newTeams.length,
+        coaches_processed: coachResults.length,
+        players_created: credentials.length,
+      },
+      coach_results: coachResults,
+      credentials,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Bulk import error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Bulk roster import (coach, team-scoped)
+app.post('/api/admin/players/import', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { players, preview } = req.body;
+    if (!players || !Array.isArray(players) || players.length === 0) {
+      return res.status(400).json({ error: 'No players provided' });
+    }
+
+    // Get team info
+    const teamResult = await pool.query('SELECT * FROM teams WHERE id = $1', [req.teamId]);
+    const team = teamResult.rows[0];
+    const requiresConsent = team.has_under_13 === true;
+
+    // Get existing usernames
+    const existingResult = await pool.query('SELECT username FROM players WHERE team_id = $1', [req.teamId]);
+    const usernameSet = new Set(existingResult.rows.map(p => p.username));
+
+    // Validation
+    const errors = [];
+    const validPlayers = [];
+    for (let i = 0; i < players.length; i++) {
+      const p = players[i];
+      const rowNum = i + 1;
+      if (!p.first_name || !p.last_name) {
+        errors.push({ row: rowNum, error: 'First name and last name are required' });
+        continue;
+      }
+      if (requiresConsent && !p.email) {
+        errors.push({ row: rowNum, warning: 'Missing parent email for under-13 team. Player will need a parent email added later.' });
+      }
+      if (p.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email)) {
+        errors.push({ row: rowNum, error: `Invalid email: ${p.email}` });
+        continue;
+      }
+      const username = generateUsername(p.first_name, p.last_name, usernameSet);
+      usernameSet.add(username);
+      validPlayers.push({ ...p, username });
+    }
+
+    const summary = {
+      players_to_create: validPlayers.length,
+      errors: errors.filter(e => e.error),
+      warnings: errors.filter(e => e.warning),
+    };
+
+    if (preview) {
+      return res.json({ preview: true, summary, errors, players: validPlayers.map(p => ({ first_name: p.first_name, last_name: p.last_name, username: p.username })) });
+    }
+
+    if (summary.errors.length > 0) {
+      return res.status(400).json({ error: 'Fix validation errors before importing', summary, errors });
+    }
+
+    await client.query('BEGIN');
+
+    const credentials = [];
+    for (const p of validPlayers) {
+      const tempPassword = generatePlayerPassword();
+      const passwordHash = await bcrypt.hash(tempPassword, 10);
+      const playerStatus = requiresConsent ? 'pending' : 'active';
+      const consentStatus = requiresConsent ? 'awaiting' : 'not_required';
+      const parentEmail = p.email ? p.email.trim() : null;
+
+      const result = await client.query(
+        `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [req.teamId, p.first_name, p.last_name, p.username, passwordHash, playerStatus, consentStatus, parentEmail]
+      );
+
+      credentials.push({
+        team_name: team.name,
+        first_name: p.first_name,
+        last_name: p.last_name,
+        username: p.username,
+        password: tempPassword,
+      });
+
+      if (requiresConsent && parentEmail) {
+        await sendConsentEmail(
+          { id: result.rows[0].id, first_name: p.first_name, last_name: p.last_name },
+          team.name,
+          parentEmail
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    await auditLog('staff', req.user.id, 'bulk_roster_import', 'team', req.teamId,
+      { players_created: credentials.length }, req);
+
+    res.json({
+      summary: { players_created: credentials.length },
+      credentials,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Bulk roster import error:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================
+// ENHANCED SEASON ENDPOINTS
+// ============================================================
+
+// Archive/end a season
+app.post('/api/admin/seasons/:id/archive', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "UPDATE seasons SET status = 'archived' WHERE id = $1 AND team_id = $2 RETURNING *",
+      [req.params.id, req.teamId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Season not found' });
+
+    // Clear active_season_id if this was the active one
+    await pool.query(
+      'UPDATE teams SET active_season_id = NULL WHERE id = $1 AND active_season_id = $2',
+      [req.teamId, req.params.id]
+    );
+
+    await auditLog('staff', req.user.id, 'season_archived', 'season', req.params.id,
+      { season_name: result.rows[0].name }, req);
+
+    res.json({ ...result.rows[0], active: false });
+  } catch (err) {
+    console.error('Archive season error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Past season leaderboard
+app.get('/api/admin/seasons/:id/leaderboard', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+  try {
+    const season = await pool.query(
+      'SELECT * FROM seasons WHERE id = $1 AND team_id = $2',
+      [req.params.id, req.teamId]
+    );
+    if (season.rows.length === 0) return res.status(404).json({ error: 'Season not found' });
+
+    const leaderboard = await pool.query(
+      `SELECT p.id, p.first_name, p.last_name, p.avatar_color,
+              pss.season_points, pss.current_streak, pss.longest_streak
+       FROM player_season_stats pss
+       JOIN players p ON p.id = pss.player_id
+       WHERE pss.season_id = $1
+       ORDER BY pss.season_points DESC`,
+      [req.params.id]
+    );
+
+    res.json({
+      season: season.rows[0],
+      leaderboard: leaderboard.rows.map(p => ({
+        ...p,
+        level: getLevelInfo(p.season_points),
+      })),
+    });
+  } catch (err) {
+    console.error('Season leaderboard error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Past seasons (player-accessible)
+app.get('/api/seasons/past', authenticate, async (req, res) => {
+  try {
+    const teamId = req.role === 'player' ? req.user.team_id : req.headers['x-team-id'];
+    if (!teamId) return res.status(400).json({ error: 'Team context required' });
+
+    const seasons = await pool.query(
+      "SELECT * FROM seasons WHERE team_id = $1 AND status = 'archived' ORDER BY start_date DESC",
+      [teamId]
+    );
+
+    // If player, include their stats for each season
+    if (req.role === 'player') {
+      const result = [];
+      for (const season of seasons.rows) {
+        const stats = await pool.query(
+          'SELECT season_points, current_streak, longest_streak FROM player_season_stats WHERE player_id = $1 AND season_id = $2',
+          [req.user.id, season.id]
+        );
+        result.push({
+          ...season,
+          my_stats: stats.rows[0] || null,
+        });
+      }
+      return res.json({ seasons: result });
+    }
+
+    res.json({ seasons: seasons.rows });
+  } catch (err) {
+    console.error('Past seasons error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
 // SPA CATCH-ALL
 // ============================================================
 
@@ -3153,6 +4190,21 @@ CREATE TABLE IF NOT EXISTS pending_emails (
   sent_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_pending_emails_status ON pending_emails(status);
+
+CREATE TABLE IF NOT EXISTS invitations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) NOT NULL,
+  role VARCHAR(20) NOT NULL CHECK (role IN ('coach', 'club_admin')),
+  club_id UUID REFERENCES clubs(id),
+  team_id UUID REFERENCES teams(id),
+  token TEXT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'expired')),
+  invited_by UUID REFERENCES users(id) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  accepted_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
+CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);
 `;
 
 const BADGE_SEEDS = [
@@ -3220,6 +4272,45 @@ async function runBuild2Migrations() {
   }
 
   console.log('Build 2 migrations complete.');
+}
+
+async function runBuild3Migrations() {
+  // Create invitations table if not exists (also in NEW_SCHEMA_SQL for fresh installs)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invitations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      email VARCHAR(255) NOT NULL,
+      role VARCHAR(20) NOT NULL CHECK (role IN ('coach', 'club_admin')),
+      club_id UUID REFERENCES clubs(id),
+      team_id UUID REFERENCES teams(id),
+      token TEXT NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'expired')),
+      invited_by UUID REFERENCES users(id) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      accepted_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email)');
+
+  // Add player_limit column to clubs if not exists
+  const limitCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'clubs' AND column_name = 'player_limit'"
+  );
+  if (limitCol.rows.length === 0) {
+    await pool.query('ALTER TABLE clubs ADD COLUMN player_limit INTEGER');
+    console.log('Added player_limit column to clubs.');
+  }
+
+  // Relax audit_log target_type constraint to include invitation and season
+  try {
+    await pool.query("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_target_type_check");
+    await pool.query("ALTER TABLE audit_log ADD CONSTRAINT audit_log_target_type_check CHECK (target_type IN ('player', 'team', 'club', 'user', 'invitation', 'season'))");
+  } catch (err) {
+    // Constraint may already be updated
+  }
+
+  console.log('Build 3 migrations complete.');
 }
 
 async function seedAppSettings() {
@@ -3624,6 +4715,7 @@ async function initDatabase() {
       // Ensure badges and levels are seeded
       await seedBadges();
       await runBuild2Migrations();
+      await runBuild3Migrations();
       await seedAppSettings();
       return;
     }
@@ -3675,6 +4767,7 @@ async function initDatabase() {
         await seedBadges();
         await seedLevels();
         await runBuild2Migrations();
+        await runBuild3Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -3703,6 +4796,7 @@ async function initDatabase() {
     await seedBadges();
     await seedLevels();
     await runBuild2Migrations();
+    await runBuild3Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {

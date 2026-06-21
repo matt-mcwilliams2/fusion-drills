@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 
 export default function InviteCoach() {
   const { apiFetch } = useAuth();
-  const [form, setForm] = useState({ first_name: '', last_name: '', email: '', password: '' });
+  const [form, setForm] = useState({ email: '' });
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState('');
 
@@ -16,8 +16,12 @@ export default function InviteCoach() {
         method: 'POST',
         body: JSON.stringify(form),
       });
-      setSuccess(`Coach ${data.coach.first_name} ${data.coach.last_name} has been added.`);
-      setForm({ first_name: '', last_name: '', email: '', password: '' });
+      if (data.linked) {
+        setSuccess(`${data.coach.first_name} ${data.coach.last_name} has been added to your team.`);
+      } else {
+        setSuccess(`Invitation sent to ${form.email}. They'll receive an email to set up their account.`);
+      }
+      setForm({ email: '' });
     } catch (err) { alert(err.message); }
     finally { setSaving(false); }
   };
@@ -29,23 +33,14 @@ export default function InviteCoach() {
         {success && <div style={{ color: 'var(--success)', marginBottom: 16, fontWeight: 600 }}>{success}</div>}
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label className="form-label">First Name</label>
-            <input className="form-input" value={form.first_name} onChange={(e) => setForm({...form, first_name: e.target.value})} required />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Last Name</label>
-            <input className="form-input" value={form.last_name} onChange={(e) => setForm({...form, last_name: e.target.value})} required />
-          </div>
-          <div className="form-group">
             <label className="form-label">Email</label>
             <input className="form-input" type="email" value={form.email} onChange={(e) => setForm({...form, email: e.target.value})} autoCapitalize="none" required />
           </div>
-          <div className="form-group">
-            <label className="form-label">Password</label>
-            <input className="form-input" type="password" value={form.password} onChange={(e) => setForm({...form, password: e.target.value})} required />
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 16 }}>
+            If this email is already registered, they'll be added to your team. Otherwise, they'll receive an invitation email to set up their account.
           </div>
           <button className="btn btn-orange" type="submit" disabled={saving} style={{ width: '100%' }}>
-            {saving ? 'Adding Coach...' : 'Add Coach'}
+            {saving ? 'Inviting...' : 'Invite Coach'}
           </button>
         </form>
       </div>

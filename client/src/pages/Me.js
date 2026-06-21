@@ -7,16 +7,19 @@ export default function Me() {
   const { apiFetch, user } = useAuth();
   const [stats, setStats] = useState(null);
   const [badges, setBadges] = useState([]);
+  const [pastSeasons, setPastSeasons] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.allSettled([
       apiFetch('/api/me/stats'),
       apiFetch('/api/me/badges'),
+      apiFetch('/api/seasons/past'),
     ])
-      .then(([statsResult, badgesResult]) => {
+      .then(([statsResult, badgesResult, seasonsResult]) => {
         if (statsResult.status === 'fulfilled') setStats(statsResult.value);
         if (badgesResult.status === 'fulfilled') setBadges(badgesResult.value.badges || []);
+        if (seasonsResult.status === 'fulfilled') setPastSeasons(seasonsResult.value.seasons || []);
       })
       .finally(() => setLoading(false));
   }, [apiFetch]);
@@ -82,6 +85,30 @@ export default function Me() {
           </div>
         ))}
       </div>
+
+      {pastSeasons.length > 0 && (
+        <>
+          <h2 className="page-title" style={{ marginTop: 24 }}>Past Challenges</h2>
+          {pastSeasons.map((s) => (
+            <div key={s.id} className="card" style={{ marginBottom: 10, padding: '12px 16px' }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>{s.name}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 8 }}>
+                {new Date(s.start_date?.split('T')[0] + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                {' — '}
+                {new Date(s.end_date?.split('T')[0] + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              </div>
+              {s.my_stats ? (
+                <div style={{ display: 'flex', gap: 16, fontSize: '0.85rem' }}>
+                  <div><span style={{ fontWeight: 700, color: 'var(--orange)' }}>{s.my_stats.season_points}</span> pts</div>
+                  <div>Best streak: <span style={{ fontWeight: 600 }}>{s.my_stats.longest_streak}</span></div>
+                </div>
+              ) : (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No stats recorded</div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }

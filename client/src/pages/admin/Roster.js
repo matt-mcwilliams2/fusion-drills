@@ -15,6 +15,10 @@ export default function Roster() {
   const [consentPlayer, setConsentPlayer] = useState(null);
   const [consentForm, setConsentForm] = useState({ parent_name: '', document_reference: '' });
   const [actionMsg, setActionMsg] = useState('');
+  const [showImport, setShowImport] = useState(false);
+  const [importCsv, setImportCsv] = useState('');
+  const [importPreview, setImportPreview] = useState(null);
+  const [importResult, setImportResult] = useState(null);
 
   const loadPlayers = async () => {
     try {
@@ -148,7 +152,10 @@ export default function Roster() {
     <div className="admin-page">
       <div className="flex-between mb-16">
         <h1 className="page-title" style={{ marginBottom: 0 }}>Roster</h1>
-        <button className="btn btn-orange btn-sm" onClick={() => setShowAdd(true)}>+ Add Player</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-outline btn-sm" onClick={() => { setShowImport(true); setImportCsv(''); setImportPreview(null); setImportResult(null); }}>Import Players</button>
+          <button className="btn btn-orange btn-sm" onClick={() => setShowAdd(true)}>+ Add Player</button>
+        </div>
       </div>
 
       {teamInfo && (
@@ -307,6 +314,106 @@ export default function Roster() {
                 <button type="submit" className="btn btn-orange" disabled={saving}>{saving ? 'Saving...' : 'Record Consent'}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showImport && (
+        <div className="modal-overlay" onClick={() => setShowImport(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
+            <h2>Import Players</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: 12 }}>
+              CSV with columns: <code style={{ fontSize: '0.8rem' }}>First Name, Last Name, Email</code>
+            </p>
+            <p style={{ fontSize: '0.8rem', color: '#666', marginBottom: 12 }}>
+              {teamInfo?.has_under_13 ? 'Email is the parent email (used for consent).' : 'Email is optional.'}
+              {' '}Usernames and passwords are auto-generated. A header row is optional.
+            </p>
+            <div style={{ marginBottom: 8 }}>
+              <input type="file" accept=".csv,.txt" onChange={(e) => {
+                const file = e.target.files[0];
+                if (file) { const r = new FileReader(); r.onload = (ev) => setImportCsv(ev.target.result); r.readAsText(file); }
+              }} />
+            </div>
+            <textarea
+              className="form-input"
+              value={importCsv}
+              onChange={(e) => setImportCsv(e.target.value)}
+              placeholder="Or paste CSV data here..."
+              rows={6}
+              style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}
+            />
+            <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+              <button className="btn btn-blue btn-sm" disabled={saving || !importCsv.trim()} onClick={async () => {
+                const lines = importCsv.trim().split('\n').filter(l => l.trim());
+                let start = 0;
+                if (lines[0] && lines[0].toLowerCase().includes('first')) start = 1;
+                const players = lines.slice(start).map(line => {
+                  const cells = line.split(',').map(c => c.trim());
+                  return { first_name: cells[0] || '', last_name: cells[1] || '', email: cells[2] || '' };
+                });
+                setSaving(true);
+                try {
+                  const data = await apiFetch('/api/admin/players/import', {
+                    method: 'POST', body: JSON.stringify({ players, preview: true }),
+                  });
+                  setImportPreview(data);
+                } catch (err) { alert(err.message); }
+                finally { setSaving(false); }
+              }}>{saving ? 'Validating...' : 'Preview'}</button>
+              {importPreview && importPreview.summary.errors.length === 0 && (
+                <button className="btn btn-orange btn-sm" disabled={saving} onClick={async () => {
+                  const lines = importCsv.trim().split('\n').filter(l => l.trim());
+                  let start = 0;
+                  if (lines[0] && lines[0].toLowerCase().includes('first')) start = 1;
+                  const players = lines.slice(start).map(line => {
+                    const cells = line.split(',').map(c => c.trim());
+                    return { first_name: cells[0] || '', last_name: cells[1] || '', email: cells[2] || '' };
+                  });
+                  setSaving(true);
+                  try {
+                    const data = await apiFetch('/api/admin/players/import', {
+                      method: 'POST', body: JSON.stringify({ players, preview: false }),
+                    });
+                    setImportResult(data);
+                    setImportPreview(null);
+                    loadPlayers();
+                  } catch (err) { alert(err.message); }
+                  finally { setSaving(false); }
+                }}>{saving ? 'Importing...' : 'Import'}</button>
+              )}
+            </div>
+            {importPreview && (
+              <div style={{ marginTop: 12, fontSize: '0.85rem' }}>
+                <div>Players to create: <strong>{importPreview.summary.players_to_create}</strong></div>
+                {importPreview.errors?.length > 0 && importPreview.errors.map((err, i) => (
+                  <div key={i} style={{ color: err.error ? '#e74c3c' : '#f39c12', fontSize: '0.8rem', marginTop: 4 }}>
+                    Row {err.row}: {err.error || err.warning}
+                  </div>
+                ))}
+              </div>
+            )}
+            {importResult && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ color: '#2ecc71', fontWeight: 600, marginBottom: 8 }}>
+                  {importResult.summary.players_created} players imported.
+                </div>
+                {importResult.credentials.length > 0 && (
+                  <button className="btn btn-blue btn-sm" onClick={() => {
+                    const header = 'Team,First Name,Last Name,Username,Password';
+                    const csvRows = importResult.credentials.map(c => `${c.team_name},${c.first_name},${c.last_name},${c.username},${c.password}`);
+                    const csv = [header, ...csvRows].join('\n');
+                    const blob = new Blob([csv], { type: 'text/csv' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url; a.download = 'player-credentials.csv'; a.click();
+                    URL.revokeObjectURL(url);
+                  }}>Download Credentials CSV</button>
+                )}
+              </div>
+            )}
+            <div style={{ marginTop: 16, textAlign: 'right' }}>
+              <button className="btn btn-outline btn-sm" onClick={() => setShowImport(false)}>Close</button>
+            </div>
           </div>
         </div>
       )}

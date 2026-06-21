@@ -15,6 +15,7 @@ import AdminLeaderboard from './pages/admin/Leaderboard';
 import InviteCoach from './pages/admin/InviteCoach';
 import SuperAdmin from './pages/SuperAdmin';
 import ClubAdmin from './pages/ClubAdmin';
+import InviteAccept from './pages/InviteAccept';
 import ConsentPage from './pages/ConsentPage';
 import ParentPortalRequest from './pages/ParentPortalRequest';
 import ParentPortal from './pages/ParentPortal';
@@ -68,7 +69,7 @@ function AppRoutes() {
         <Route path="leaderboard" element={<PlayerRoute><Leaderboard /></PlayerRoute>} />
         <Route path="me" element={<PlayerRoute><Me /></PlayerRoute>} />
       </Route>
-      <Route path="/admin" element={<StaffRoute roles={['coach', 'super_admin']}><AdminLayout /></StaffRoute>}>
+      <Route path="/admin" element={<StaffRoute roles={['coach', 'super_admin', 'club_admin']}><AdminLayout /></StaffRoute>}>
         <Route index element={<Roster />} />
         <Route path="drills" element={<Drills />} />
         <Route path="seasons" element={<Seasons />} />
@@ -77,6 +78,7 @@ function AppRoutes() {
       </Route>
       <Route path="/super" element={<StaffRoute roles={['super_admin']}><SuperAdmin /></StaffRoute>} />
       <Route path="/club" element={<StaffRoute roles={['club_admin']}><ClubAdmin /></StaffRoute>} />
+      <Route path="/invite/:token" element={<InviteAccept />} />
       <Route path="/consent/:token" element={<ConsentPage />} />
       <Route path="/parent-portal" element={<ParentPortalRequest />} />
       <Route path="/parent-portal/:token" element={<ParentPortal />} />
