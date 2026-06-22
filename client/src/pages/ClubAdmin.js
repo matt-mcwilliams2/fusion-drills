@@ -34,6 +34,11 @@ export default function ClubAdmin() {
   const [clubReports, setClubReports] = useState(null);
   const [reportsLoading, setReportsLoading] = useState(false);
 
+  // Billing
+  const [billingData, setBillingData] = useState(null);
+  const [billingPlans, setBillingPlans] = useState(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+
   // Players for move (loaded when a team is selected)
   const [teamPlayers, setTeamPlayers] = useState([]);
   const [moveSourceTeam, setMoveSourceTeam] = useState('');
@@ -62,7 +67,24 @@ export default function ClubAdmin() {
     finally { setReportsLoading(false); }
   }, [apiFetch]);
 
+  const loadBilling = useCallback(async () => {
+    setBillingLoading(true);
+    try {
+      const [subData, planData] = await Promise.all([
+        apiFetch('/api/billing/subscription'),
+        apiFetch('/api/billing/plans'),
+      ]);
+      setBillingData(subData);
+      setBillingPlans(planData);
+    } catch (err) { console.error(err); }
+    finally { setBillingLoading(false); }
+  }, [apiFetch]);
+
   useEffect(() => { loadDashboard(); loadCoaches(); }, [loadDashboard, loadCoaches]);
+
+  useEffect(() => {
+    if (activeTab === 'billing') loadBilling();
+  }, [activeTab, loadBilling]);
 
   const loadTeamPlayers = async (teamId) => {
     setMoveSourceTeam(teamId);
@@ -206,6 +228,45 @@ export default function ClubAdmin() {
     reader.readAsText(file);
   };
 
+  // Billing actions
+  const handleCheckout = async (plan, interval) => {
+    setError('');
+    setSaving(true);
+    try {
+      const data = await apiFetch('/api/billing/checkout', {
+        method: 'POST',
+        body: JSON.stringify({ plan, interval }),
+      });
+      window.location.href = data.checkout_url;
+    } catch (err) { setError(err.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleOpenPortal = async () => {
+    setError('');
+    setSaving(true);
+    try {
+      const data = await apiFetch('/api/billing/portal', { method: 'POST' });
+      window.location.href = data.portal_url;
+    } catch (err) { setError(err.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleAddPlayers = async (quantity) => {
+    setError('');
+    setSaving(true);
+    try {
+      await apiFetch('/api/billing/add-players', {
+        method: 'POST',
+        body: JSON.stringify({ quantity }),
+      });
+      setSuccess(`Added ${quantity} player${quantity !== 1 ? 's' : ''} to your plan.`);
+      loadBilling();
+      loadDashboard();
+    } catch (err) { setError(err.message); }
+    finally { setSaving(false); }
+  };
+
   const ageGroups = ['U6','U7','U8','U9','U10','U11','U12','U13','U14','U15','U16','U17','U18','U19'];
 
   if (loading) {
@@ -242,6 +303,26 @@ export default function ClubAdmin() {
           </button>
         ))}
       </nav>
+
+      {dashboard?.subscription?.status === 'past_due' && (
+        <div style={{ background: 'rgba(231,76,60,0.15)', color: '#e74c3c', padding: '10px 16px', textAlign: 'center', fontSize: '0.85rem' }}>
+          There's a problem with your payment. Please update your card.
+          <button style={{ marginLeft: 8, background: 'none', border: 'none', color: '#e74c3c', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.85rem' }}
+            onClick={() => setActiveTab('billing')}>Update now</button>
+        </div>
+      )}
+      {dashboard?.subscription?.status === 'suspended' && (
+        <div style={{ background: 'rgba(231,76,60,0.2)', color: '#e74c3c', padding: '12px 16px', textAlign: 'center', fontSize: '0.85rem', fontWeight: 600 }}>
+          This account is paused. Please update billing to restore access.
+          <button style={{ marginLeft: 8, background: 'none', border: 'none', color: '#e74c3c', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.85rem' }}
+            onClick={() => setActiveTab('billing')}>Manage Billing</button>
+        </div>
+      )}
+      {dashboard?.subscription?.status === 'trialing' && dashboard?.subscription?.trial_end && (
+        <div style={{ background: 'rgba(52,152,219,0.1)', color: '#3498db', padding: '8px 16px', textAlign: 'center', fontSize: '0.8rem' }}>
+          Free trial ends {new Date(dashboard.subscription.trial_end).toLocaleDateString()}
+        </div>
+      )}
 
       <div className="admin-page">
         {/* Plan usage */}
@@ -490,9 +571,140 @@ export default function ClubAdmin() {
 
         {/* BILLING TAB */}
         {activeTab === 'billing' && (
-          <div style={{ textAlign: 'center', padding: 40 }}>
+          <div>
             <h2 className="page-title" style={{ fontSize: '1.1rem' }}>Billing</h2>
-            <p style={{ color: 'var(--text-muted)' }}>Billing is managed elsewhere. Coming in Build 5.</p>
+            {billingLoading && <div className="loading"><div className="spinner" /></div>}
+
+            {!billingLoading && billingData?.subscription && (
+              <>
+                {/* Current plan card */}
+                <div className="card" style={{ marginBottom: 12 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <strong style={{ fontSize: '1rem' }}>
+                        {billingData.subscription.plan.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                      </strong>
+                      <span style={{ marginLeft: 8, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        ({billingData.subscription.billing_interval})
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '0.75rem', padding: '2px 8px', borderRadius: 4,
+                      background: billingData.subscription.status === 'active' ? 'rgba(46,204,113,0.15)' :
+                                  billingData.subscription.status === 'trialing' ? 'rgba(52,152,219,0.15)' :
+                                  billingData.subscription.status === 'past_due' ? 'rgba(231,76,60,0.15)' : 'rgba(149,165,166,0.15)',
+                      color: billingData.subscription.status === 'active' ? '#2ecc71' :
+                             billingData.subscription.status === 'trialing' ? '#3498db' :
+                             billingData.subscription.status === 'past_due' ? '#e74c3c' : '#95a5a6'
+                    }}>
+                      {billingData.subscription.status}
+                    </div>
+                  </div>
+                  {billingData.subscription.current_period_end && (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                      Next billing date: {new Date(billingData.subscription.current_period_end).toLocaleDateString()}
+                    </div>
+                  )}
+                  {billingData.subscription.trial_end && billingData.subscription.status === 'trialing' && (
+                    <div style={{ fontSize: '0.8rem', color: '#3498db', marginTop: 4 }}>
+                      Trial ends: {new Date(billingData.subscription.trial_end).toLocaleDateString()}
+                    </div>
+                  )}
+                </div>
+
+                {/* Player usage */}
+                <div className="card" style={{ marginBottom: 12 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <strong>Player Usage</strong>
+                    <span style={{ fontSize: '0.85rem', color: billingData.usage.players > billingData.usage.cap ? '#e74c3c' : 'var(--text-muted)' }}>
+                      {billingData.usage.players} of {billingData.usage.cap} players
+                    </span>
+                  </div>
+                  <div style={{ height: 8, background: 'rgba(255,255,255,0.1)', borderRadius: 4, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${Math.min(100, (billingData.usage.players / billingData.usage.cap) * 100)}%`,
+                      height: '100%',
+                      background: billingData.usage.players >= billingData.usage.cap ? '#e74c3c' : 'var(--orange)',
+                      borderRadius: 4,
+                      transition: 'width 0.3s'
+                    }} />
+                  </div>
+                  {billingData.usage.players > billingData.usage.cap && (
+                    <div style={{ fontSize: '0.8rem', color: '#e74c3c', marginTop: 6 }}>
+                      Over limit. New player adds are blocked until you upgrade or add players.
+                    </div>
+                  )}
+                  {billingData.subscription.addon_quantity > 0 && (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                      Includes {billingData.subscription.addon_quantity} add-on player{billingData.subscription.addon_quantity !== 1 ? 's' : ''}
+                    </div>
+                  )}
+                </div>
+
+                {/* Payment method */}
+                {billingData.subscription.card_last4 && (
+                  <div className="card" style={{ marginBottom: 12 }}>
+                    <strong>Payment Method</strong>
+                    <div style={{ marginTop: 4, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                      {billingData.subscription.card_brand && billingData.subscription.card_brand.charAt(0).toUpperCase() + billingData.subscription.card_brand.slice(1)} ending in {billingData.subscription.card_last4}
+                      <span style={{ marginLeft: 8 }}>
+                        (expires {billingData.subscription.card_exp_month}/{billingData.subscription.card_exp_year})
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
+                  <button className="btn btn-outline btn-sm" onClick={handleOpenPortal} disabled={saving}>
+                    Manage Billing
+                  </button>
+                  <button className="btn btn-outline btn-sm" onClick={() => handleAddPlayers(5)} disabled={saving}>
+                    + Add 5 Players
+                  </button>
+                  <button className="btn btn-outline btn-sm" onClick={() => handleAddPlayers(10)} disabled={saving}>
+                    + Add 10 Players
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* No subscription - show plan selection */}
+            {!billingLoading && !billingData?.subscription && billingPlans && (
+              <>
+                <p style={{ color: 'var(--text-muted)', marginBottom: 16, fontSize: '0.9rem' }}>
+                  Choose a plan to get started with a 14-day free trial.
+                </p>
+                <div style={{ display: 'grid', gap: 12 }}>
+                  {billingPlans.plans.map(plan => (
+                    <div key={plan.id} className="card" style={{ padding: '14px 16px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <strong>{plan.name}</strong>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                            Up to {plan.player_cap} players
+                          </div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{plan.monthly_price}/mo</div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>or {plan.annual_price}/yr</div>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <button className="btn btn-orange btn-sm" onClick={() => handleCheckout(plan.id, 'monthly')} disabled={saving}>
+                          Monthly
+                        </button>
+                        <button className="btn btn-outline btn-sm" onClick={() => handleCheckout(plan.id, 'annual')} disabled={saving}>
+                          Annual (save {Math.round((1 - (parseFloat(plan.annual_price.replace(/[$,]/g, '')) / (parseFloat(plan.monthly_price.replace(/[$,]/g, '')) * 12))) * 100)}%)
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 16, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  Need more players? Add-on players available for {billingPlans.addon.per_player_monthly}/mo or {billingPlans.addon.per_player_annual}/yr each.
+                </div>
+              </>
+            )}
           </div>
         )}
 

@@ -11,6 +11,9 @@ const { Resend } = require('resend');
 const { TOTP, Secret } = require('otpauth');
 const QRCode = require('qrcode');
 const cron = require('node-cron');
+const Stripe = require('stripe');
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+if (!stripe) console.warn('WARNING: Stripe not configured (STRIPE_SECRET_KEY missing). Billing features disabled.');
 
 const app = express();
 const dbUrl = process.env.DATABASE_URL || '';
@@ -30,7 +33,13 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const APP_URL = process.env.APP_URL || 'http://localhost:3000';
 
 app.use(cors());
-app.use(express.json());
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/billing/webhook') {
+    express.raw({ type: 'application/json' })(req, res, next);
+  } else {
+    express.json()(req, res, next);
+  }
+});
 app.use(express.static(path.join(__dirname, '../client/build')));
 
 // ============================================================
@@ -308,6 +317,160 @@ async function auditLog(actorType, actorId, action, targetType, targetId, metada
     );
   } catch (err) {
     console.error('Audit log error:', err.message);
+  }
+}
+
+// ============================================================
+// BILLING HELPERS
+// ============================================================
+
+// Plan definitions (player caps)
+const PLAN_CAPS = { team: 20, small_club: 200, large_club: 500, mega_club: 1000 };
+
+// Resolve subscription for a given owner (club or standalone team)
+async function getSubscription(ownerType, ownerId) {
+  const result = await pool.query(
+    "SELECT * FROM subscriptions WHERE owner_type = $1 AND owner_id = $2 ORDER BY created_at DESC LIMIT 1",
+    [ownerType, ownerId]
+  );
+  return result.rows[0] || null;
+}
+
+// Resolve the billing owner context from a team_id
+async function resolveBillingOwner(teamId) {
+  const team = await pool.query('SELECT club_id FROM teams WHERE id = $1', [teamId]);
+  if (!team.rows[0]) return null;
+  if (team.rows[0].club_id) {
+    return { ownerType: 'club', ownerId: team.rows[0].club_id };
+  }
+  return { ownerType: 'team', ownerId: teamId };
+}
+
+// Resolve subscription from request context
+async function getSubscriptionForRequest(req) {
+  if (req.user && req.user.club_id) {
+    return getSubscription('club', req.user.club_id);
+  }
+  const teamId = req.teamId || req.headers['x-team-id'];
+  if (teamId) {
+    const owner = await resolveBillingOwner(teamId);
+    if (owner) return getSubscription(owner.ownerType, owner.ownerId);
+  }
+  return null;
+}
+
+// Get current active player count for a subscription owner
+async function getActivePlayerCount(ownerType, ownerId) {
+  if (ownerType === 'club') {
+    const result = await pool.query(
+      "SELECT COUNT(*) as count FROM players p JOIN teams t ON t.id = p.team_id WHERE t.club_id = $1 AND p.status != 'inactive'",
+      [ownerId]
+    );
+    return parseInt(result.rows[0].count);
+  } else {
+    const result = await pool.query(
+      "SELECT COUNT(*) as count FROM players WHERE team_id = $1 AND status != 'inactive'",
+      [ownerId]
+    );
+    return parseInt(result.rows[0].count);
+  }
+}
+
+// Check if adding N players would exceed the player cap
+async function checkPlayerCap(ownerType, ownerId, additionalPlayers = 1) {
+  const sub = await getSubscription(ownerType, ownerId);
+  if (!sub) return { allowed: true }; // No subscription = no cap enforced
+  const effectiveCap = sub.player_cap + sub.addon_quantity;
+  const currentCount = await getActivePlayerCount(ownerType, ownerId);
+  if (currentCount + additionalPlayers > effectiveCap) {
+    // Get add-on price for the error message
+    const addonKey = sub.billing_interval === 'annual' ? 'addon_player_annual' : 'addon_player_monthly';
+    const addonRow = await pool.query("SELECT value FROM billing_config WHERE key = $1", [addonKey]);
+    const addonPrice = sub.billing_interval === 'annual' ? '$4.99' : '$0.59';
+    return {
+      allowed: false,
+      current: currentCount,
+      cap: effectiveCap,
+      addon_price: addonPrice,
+      error: `You've reached your plan limit of ${effectiveCap} players. Add more players for ${addonPrice} each, or upgrade your plan.`
+    };
+  }
+  return { allowed: true, current: currentCount, cap: effectiveCap };
+}
+
+// Find billing contact email for a subscription owner
+async function getBillingContact(ownerType, ownerId) {
+  if (ownerType === 'club') {
+    const admin = await pool.query(
+      "SELECT email FROM users WHERE club_id = $1 AND role = 'club_admin' AND status = 'active' LIMIT 1",
+      [ownerId]
+    );
+    return admin.rows[0]?.email || null;
+  } else {
+    const coach = await pool.query(
+      "SELECT u.email FROM users u JOIN coach_teams ct ON ct.user_id = u.id WHERE ct.team_id = $1 AND u.status = 'active' LIMIT 1",
+      [ownerId]
+    );
+    return coach.rows[0]?.email || null;
+  }
+}
+
+// Billing email functions
+async function sendPaymentFailedEmail(subscription) {
+  const email = await getBillingContact(subscription.owner_type, subscription.owner_id);
+  if (!email) return;
+  const html = `<h2>Payment Failed</h2>
+<p>We were unable to process your payment for Daily Reps.</p>
+<p>Please update your payment method to avoid service interruption.</p>
+<p><a href="${APP_URL}/club?tab=billing">Update Payment Method</a></p>`;
+  await sendEmail(email, 'Daily Reps: Payment Failed - Action Required', html);
+}
+
+async function sendTrialEndingEmail(subscription) {
+  const email = await getBillingContact(subscription.owner_type, subscription.owner_id);
+  if (!email) return;
+  const daysLeft = subscription.trial_end
+    ? Math.max(1, Math.ceil((new Date(subscription.trial_end) - new Date()) / (1000 * 60 * 60 * 24)))
+    : 3;
+  const html = `<h2>Your Trial is Ending Soon</h2>
+<p>Your Daily Reps free trial ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.</p>
+<p>Add a payment method to continue using Daily Reps without interruption.</p>
+<p><a href="${APP_URL}/club?tab=billing">Manage Billing</a></p>`;
+  await sendEmail(email, `Daily Reps: Your trial ends in ${daysLeft} days`, html);
+}
+
+async function sendCardExpiryReminderEmail(subscription, daysUntilExpiry) {
+  const email = await getBillingContact(subscription.owner_type, subscription.owner_id);
+  if (!email) return;
+  const html = `<h2>Card Expiring Soon</h2>
+<p>The card ending in ${subscription.card_last4} on your Daily Reps account expires in ${daysUntilExpiry} day${daysUntilExpiry !== 1 ? 's' : ''}.</p>
+<p>Please update your payment method to avoid service interruption.</p>
+<p><a href="${APP_URL}/club?tab=billing">Update Payment Method</a></p>`;
+  await sendEmail(email, `Daily Reps: Card expires in ${daysUntilExpiry} days`, html);
+}
+
+// Middleware: block write operations when subscription is suspended or canceled
+async function requireActiveSubscription(req, res, next) {
+  try {
+    const sub = await getSubscriptionForRequest(req);
+    if (!sub) return next(); // No subscription = no restriction
+    if (sub.status === 'suspended') {
+      return res.status(403).json({
+        error: 'This account is paused due to unpaid subscription. Please update your payment method.',
+        subscription_status: 'suspended'
+      });
+    }
+    if (sub.status === 'canceled') {
+      return res.status(403).json({
+        error: 'This account has been canceled. Please resubscribe to continue.',
+        subscription_status: 'canceled'
+      });
+    }
+    req.subscription = sub;
+    next();
+  } catch (err) {
+    console.error('Subscription check error:', err);
+    next(); // Fail open
   }
 }
 
@@ -1712,7 +1875,7 @@ app.get('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 
   }
 });
 
-app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, requireActiveSubscription, async (req, res) => {
   try {
     const { first_name, last_name, username, password, parent_email } = req.body;
     if (!first_name || !last_name || !username || !password) {
@@ -1720,11 +1883,19 @@ app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin',
     }
 
     // Check if team requires consent
-    const teamResult = await pool.query('SELECT has_under_13, name FROM teams WHERE id = $1', [req.teamId]);
+    const teamResult = await pool.query('SELECT has_under_13, name, club_id FROM teams WHERE id = $1', [req.teamId]);
     const requiresConsent = teamResult.rows[0]?.has_under_13 === true;
 
     if (requiresConsent && !parent_email) {
       return res.status(400).json({ error: 'Parent email is required for teams with under-13 players' });
+    }
+
+    // Player cap enforcement
+    const ownerType = teamResult.rows[0]?.club_id ? 'club' : 'team';
+    const ownerId = teamResult.rows[0]?.club_id || req.teamId;
+    const capCheck = await checkPlayerCap(ownerType, ownerId, 1);
+    if (!capCheck.allowed) {
+      return res.status(403).json({ error: capCheck.error, usage: { current: capCheck.current, cap: capCheck.cap, addon_price: capCheck.addon_price } });
     }
 
     const playerStatus = requiresConsent ? 'pending' : 'active';
@@ -1856,7 +2027,7 @@ app.get('/api/admin/drills', authenticate, requireRole('coach', 'super_admin', '
   }
 });
 
-app.post('/api/admin/drills', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
+app.post('/api/admin/drills', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, requireActiveSubscription, async (req, res) => {
   try {
     const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge } = req.body;
     if (!date || !title) {
@@ -2108,7 +2279,7 @@ app.get('/api/admin/seasons', authenticate, requireRole('coach', 'super_admin', 
   }
 });
 
-app.post('/api/admin/seasons', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
+app.post('/api/admin/seasons', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, requireActiveSubscription, async (req, res) => {
   try {
     const { name, start_date } = req.body;
     let { end_date } = req.body;
@@ -3422,11 +3593,29 @@ app.get('/api/club/dashboard', authenticate, requireRole('club_admin'), requireC
       [req.clubId]
     );
 
+    // Subscription info
+    const subResult = await pool.query(
+      "SELECT status, plan, player_cap, addon_quantity, current_period_end, trial_end, billing_interval, card_brand, card_last4 FROM subscriptions WHERE owner_type = 'club' AND owner_id = $1 ORDER BY created_at DESC LIMIT 1",
+      [req.clubId]
+    );
+    const subscription = subResult.rows[0] || null;
+    const effectiveCap = subscription ? subscription.player_cap + subscription.addon_quantity : club.player_limit;
+
     res.json({
-      club: { id: club.id, name: club.name, status: club.status, player_limit: club.player_limit },
+      club: { id: club.id, name: club.name, status: club.status, player_limit: effectiveCap },
       teams: teamsResult.rows,
       total_players: parseInt(countResult.rows[0].total),
       invitations: invitations.rows,
+      subscription: subscription ? {
+        status: subscription.status,
+        plan: subscription.plan,
+        billing_interval: subscription.billing_interval,
+        player_cap: subscription.player_cap + subscription.addon_quantity,
+        current_period_end: subscription.current_period_end,
+        trial_end: subscription.trial_end,
+        card_brand: subscription.card_brand,
+        card_last4: subscription.card_last4,
+      } : null,
     });
   } catch (err) {
     console.error('Club dashboard error:', err);
@@ -3602,7 +3791,7 @@ app.get('/api/club/reports', authenticate, requireRole('club_admin'), requireClu
 });
 
 // Create team
-app.post('/api/club/teams', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+app.post('/api/club/teams', authenticate, requireRole('club_admin'), requireClubAccess, requireActiveSubscription, async (req, res) => {
   const client = await pool.connect();
   try {
     const { name, age_group, has_under_13, coach_ids } = req.body;
@@ -3816,7 +4005,7 @@ app.post('/api/club/players/:id/move', authenticate, requireRole('club_admin'), 
 });
 
 // Bulk team import (club admin)
-app.post('/api/club/import', authenticate, requireRole('club_admin'), requireClubAccess, async (req, res) => {
+app.post('/api/club/import', authenticate, requireRole('club_admin'), requireClubAccess, requireActiveSubscription, async (req, res) => {
   const client = await pool.connect();
   try {
     const { rows, preview } = req.body;
@@ -3901,6 +4090,15 @@ app.post('/api/club/import', authenticate, requireRole('club_admin'), requireClu
     // Commit pass — only if no hard errors
     if (summary.errors.length > 0) {
       return res.status(400).json({ error: 'Fix validation errors before importing', summary, errors });
+    }
+
+    // Player cap enforcement
+    const playerCount = rows.filter(r => r.type && r.type.toLowerCase().trim() === 'player').length;
+    if (playerCount > 0) {
+      const capCheck = await checkPlayerCap('club', req.clubId, playerCount);
+      if (!capCheck.allowed) {
+        return res.status(403).json({ error: capCheck.error, usage: { current: capCheck.current, cap: capCheck.cap, addon_price: capCheck.addon_price } });
+      }
     }
 
     await client.query('BEGIN');
@@ -4043,7 +4241,7 @@ app.post('/api/club/import', authenticate, requireRole('club_admin'), requireClu
 });
 
 // Bulk roster import (coach, team-scoped)
-app.post('/api/admin/players/import', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
+app.post('/api/admin/players/import', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, requireActiveSubscription, async (req, res) => {
   const client = await pool.connect();
   try {
     const { players, preview } = req.body;
@@ -4094,6 +4292,14 @@ app.post('/api/admin/players/import', authenticate, requireRole('coach', 'super_
 
     if (summary.errors.length > 0) {
       return res.status(400).json({ error: 'Fix validation errors before importing', summary, errors });
+    }
+
+    // Player cap enforcement
+    const ownerType = team.club_id ? 'club' : 'team';
+    const ownerId = team.club_id || req.teamId;
+    const capCheck = await checkPlayerCap(ownerType, ownerId, validPlayers.length);
+    if (!capCheck.allowed) {
+      return res.status(403).json({ error: capCheck.error, usage: { current: capCheck.current, cap: capCheck.cap, addon_price: capCheck.addon_price } });
     }
 
     await client.query('BEGIN');
@@ -4239,6 +4445,549 @@ app.get('/api/seasons/past', authenticate, async (req, res) => {
   } catch (err) {
     console.error('Past seasons error:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// BILLING ROUTES
+// ============================================================
+
+// Get current subscription info
+app.get('/api/billing/subscription', authenticate, requireRole('club_admin', 'coach', 'super_admin'), async (req, res) => {
+  try {
+    let ownerType, ownerId;
+    if (req.user.club_id) {
+      ownerType = 'club'; ownerId = req.user.club_id;
+    } else {
+      const teamId = req.headers['x-team-id'];
+      if (!teamId) return res.status(400).json({ error: 'No billing context' });
+      ownerType = 'team'; ownerId = teamId;
+    }
+
+    const sub = await getSubscription(ownerType, ownerId);
+    const playerCount = await getActivePlayerCount(ownerType, ownerId);
+    const effectiveCap = sub ? sub.player_cap + sub.addon_quantity : null;
+
+    res.json({
+      subscription: sub ? {
+        id: sub.id,
+        plan: sub.plan,
+        status: sub.status,
+        billing_interval: sub.billing_interval,
+        player_cap: effectiveCap,
+        base_cap: sub.player_cap,
+        addon_quantity: sub.addon_quantity,
+        card_brand: sub.card_brand,
+        card_last4: sub.card_last4,
+        card_exp_month: sub.card_exp_month,
+        card_exp_year: sub.card_exp_year,
+        current_period_end: sub.current_period_end,
+        trial_end: sub.trial_end,
+        canceled_at: sub.canceled_at,
+      } : null,
+      usage: { players: playerCount, cap: effectiveCap },
+    });
+  } catch (err) {
+    console.error('Get subscription error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get available plans
+app.get('/api/billing/plans', authenticate, async (req, res) => {
+  try {
+    const config = await pool.query('SELECT key, value FROM billing_config');
+    const priceMap = {};
+    for (const row of config.rows) {
+      priceMap[row.key] = row.value;
+    }
+    res.json({
+      plans: [
+        { id: 'team', name: 'Team', player_cap: 20, monthly_price: '$9.99', annual_price: '$79.99', monthly_price_id: priceMap.team_monthly || null, annual_price_id: priceMap.team_annual || null },
+        { id: 'small_club', name: 'Small Club', player_cap: 200, monthly_price: '$74.99', annual_price: '$649.99', monthly_price_id: priceMap.small_club_monthly || null, annual_price_id: priceMap.small_club_annual || null },
+        { id: 'large_club', name: 'Large Club', player_cap: 500, monthly_price: '$179.99', annual_price: '$1,499.99', monthly_price_id: priceMap.large_club_monthly || null, annual_price_id: priceMap.large_club_annual || null },
+        { id: 'mega_club', name: 'Mega Club', player_cap: 1000, monthly_price: '$349.99', annual_price: '$2,899.99', monthly_price_id: priceMap.mega_club_monthly || null, annual_price_id: priceMap.mega_club_annual || null },
+      ],
+      addon: { per_player_monthly: '$0.59', per_player_annual: '$4.99', monthly_price_id: priceMap.addon_player_monthly || null, annual_price_id: priceMap.addon_player_annual || null },
+    });
+  } catch (err) {
+    console.error('Get plans error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create Stripe Checkout session
+app.post('/api/billing/checkout', authenticate, requireRole('club_admin', 'coach'), async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const { plan, interval } = req.body;
+    if (!plan || !interval) return res.status(400).json({ error: 'Plan and interval are required' });
+    if (!PLAN_CAPS[plan]) return res.status(400).json({ error: 'Invalid plan' });
+    if (!['monthly', 'annual'].includes(interval)) return res.status(400).json({ error: 'Invalid interval' });
+
+    let ownerType, ownerId, ownerName;
+    if (req.user.club_id) {
+      ownerType = 'club'; ownerId = req.user.club_id;
+      const club = await pool.query('SELECT name FROM clubs WHERE id = $1', [ownerId]);
+      ownerName = club.rows[0]?.name || 'Club';
+    } else {
+      const teamId = req.headers['x-team-id'];
+      if (!teamId) return res.status(400).json({ error: 'No billing context' });
+      ownerType = 'team'; ownerId = teamId;
+      const team = await pool.query('SELECT name FROM teams WHERE id = $1', [ownerId]);
+      ownerName = team.rows[0]?.name || 'Team';
+    }
+
+    // Get price ID from billing_config
+    const priceKey = `${plan}_${interval}`;
+    const configRow = await pool.query('SELECT value FROM billing_config WHERE key = $1', [priceKey]);
+    if (!configRow.rows[0]) return res.status(400).json({ error: 'Plan not configured. Run the Stripe setup script.' });
+    const priceId = configRow.rows[0].value;
+
+    const playerCap = PLAN_CAPS[plan];
+
+    // Create or update subscription record (incomplete until webhook confirms)
+    let sub = await getSubscription(ownerType, ownerId);
+    if (!sub || sub.status === 'canceled') {
+      const result = await pool.query(
+        `INSERT INTO subscriptions (owner_type, owner_id, plan, billing_interval, status, player_cap)
+         VALUES ($1, $2, $3, $4, 'trialing', $5) RETURNING *`,
+        [ownerType, ownerId, plan, interval, playerCap]
+      );
+      sub = result.rows[0];
+    }
+
+    // Create Stripe Checkout session
+    const sessionParams = {
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      metadata: { owner_type: ownerType, owner_id: ownerId, subscription_id: sub.id },
+      subscription_data: {
+        metadata: { owner_type: ownerType, owner_id: ownerId },
+        trial_period_days: 14,
+      },
+      success_url: `${APP_URL}/club?billing=success`,
+      cancel_url: `${APP_URL}/club?billing=cancel`,
+    };
+
+    // If we already have a stripe customer, reuse it
+    if (sub.stripe_customer_id) {
+      sessionParams.customer = sub.stripe_customer_id;
+    } else {
+      sessionParams.customer_email = req.user.email;
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
+
+    await auditLog('staff', req.user.id, 'billing_checkout_started', 'subscription', ownerId,
+      { owner_type: ownerType, plan, interval }, req);
+
+    res.json({ checkout_url: session.url });
+  } catch (err) {
+    console.error('Create checkout error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create Stripe Customer Portal session
+app.post('/api/billing/portal', authenticate, requireRole('club_admin', 'coach'), async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    let ownerType, ownerId;
+    if (req.user.club_id) {
+      ownerType = 'club'; ownerId = req.user.club_id;
+    } else {
+      const teamId = req.headers['x-team-id'];
+      if (!teamId) return res.status(400).json({ error: 'No billing context' });
+      ownerType = 'team'; ownerId = teamId;
+    }
+
+    const sub = await getSubscription(ownerType, ownerId);
+    if (!sub || !sub.stripe_customer_id) {
+      return res.status(400).json({ error: 'No active subscription. Please subscribe first.' });
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: sub.stripe_customer_id,
+      return_url: `${APP_URL}/club?tab=billing`,
+    });
+
+    res.json({ portal_url: session.url });
+  } catch (err) {
+    console.error('Create portal session error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Add add-on players
+app.post('/api/billing/add-players', authenticate, requireRole('club_admin', 'coach'), async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const { quantity } = req.body;
+    if (!quantity || quantity < 1) return res.status(400).json({ error: 'Quantity must be at least 1' });
+
+    let ownerType, ownerId;
+    if (req.user.club_id) {
+      ownerType = 'club'; ownerId = req.user.club_id;
+    } else {
+      const teamId = req.headers['x-team-id'];
+      if (!teamId) return res.status(400).json({ error: 'No billing context' });
+      ownerType = 'team'; ownerId = teamId;
+    }
+
+    const sub = await getSubscription(ownerType, ownerId);
+    if (!sub || !sub.stripe_subscription_id) {
+      return res.status(400).json({ error: 'No active subscription found.' });
+    }
+
+    // Get the addon price ID for this subscription's interval
+    const addonKey = `addon_player_${sub.billing_interval}`;
+    const addonRow = await pool.query('SELECT value FROM billing_config WHERE key = $1', [addonKey]);
+    if (!addonRow.rows[0]) return res.status(400).json({ error: 'Add-on pricing not configured.' });
+    const addonPriceId = addonRow.rows[0].value;
+
+    // Get existing subscription items from Stripe
+    const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, {
+      expand: ['items'],
+    });
+
+    // Find existing addon item or create one
+    const existingAddon = stripeSub.items.data.find(item => item.price.id === addonPriceId);
+    const newTotal = (sub.addon_quantity || 0) + quantity;
+
+    if (existingAddon) {
+      // Update quantity on existing item
+      await stripe.subscriptionItems.update(existingAddon.id, {
+        quantity: newTotal,
+        proration_behavior: 'create_prorations',
+      });
+    } else {
+      // Add new subscription item
+      await stripe.subscriptionItems.create({
+        subscription: sub.stripe_subscription_id,
+        price: addonPriceId,
+        quantity: newTotal,
+        proration_behavior: 'create_prorations',
+      });
+    }
+
+    // Update local record
+    await pool.query(
+      'UPDATE subscriptions SET addon_quantity = $1, updated_at = NOW() WHERE id = $2',
+      [newTotal, sub.id]
+    );
+
+    await auditLog('staff', req.user.id, 'addon_players_added', 'subscription', ownerId,
+      { owner_type: ownerType, quantity, new_total: newTotal }, req);
+
+    res.json({
+      addon_quantity: newTotal,
+      effective_cap: sub.player_cap + newTotal,
+      message: `Added ${quantity} player${quantity !== 1 ? 's' : ''} to your plan.`,
+    });
+  } catch (err) {
+    console.error('Add players error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// STRIPE WEBHOOK
+// ============================================================
+
+// Map Stripe subscription status to our internal status
+function mapStripeStatus(stripeStatus) {
+  const map = {
+    'trialing': 'trialing',
+    'active': 'active',
+    'past_due': 'past_due',
+    'canceled': 'canceled',
+    'unpaid': 'suspended',
+    'incomplete': 'trialing',
+    'incomplete_expired': 'canceled',
+    'paused': 'suspended',
+  };
+  return map[stripeStatus] || 'active';
+}
+
+// Core sync: update local subscription from Stripe's subscription object
+async function syncSubscriptionFromStripe(stripeSubscription) {
+  const customerId = typeof stripeSubscription.customer === 'string'
+    ? stripeSubscription.customer
+    : stripeSubscription.customer?.id;
+
+  // Find local subscription by stripe_subscription_id or stripe_customer_id
+  let localSub = await pool.query(
+    "SELECT * FROM subscriptions WHERE stripe_subscription_id = $1",
+    [stripeSubscription.id]
+  );
+  if (localSub.rows.length === 0) {
+    localSub = await pool.query(
+      "SELECT * FROM subscriptions WHERE stripe_customer_id = $1",
+      [customerId]
+    );
+  }
+  // Try matching via metadata
+  if (localSub.rows.length === 0 && stripeSubscription.metadata) {
+    const { owner_type, owner_id } = stripeSubscription.metadata;
+    if (owner_type && owner_id) {
+      localSub = await pool.query(
+        "SELECT * FROM subscriptions WHERE owner_type = $1 AND owner_id = $2 ORDER BY created_at DESC LIMIT 1",
+        [owner_type, owner_id]
+      );
+    }
+  }
+  if (localSub.rows.length === 0) {
+    console.warn('syncSubscriptionFromStripe: No matching local subscription found for', stripeSubscription.id);
+    return;
+  }
+
+  const sub = localSub.rows[0];
+  const status = mapStripeStatus(stripeSubscription.status);
+
+  // Extract card info from default payment method
+  let cardBrand = sub.card_brand, cardLast4 = sub.card_last4,
+      cardExpMonth = sub.card_exp_month, cardExpYear = sub.card_exp_year;
+
+  if (stripeSubscription.default_payment_method && typeof stripeSubscription.default_payment_method === 'object') {
+    const pm = stripeSubscription.default_payment_method;
+    if (pm.card) {
+      cardBrand = pm.card.brand;
+      cardLast4 = pm.card.last4;
+      cardExpMonth = pm.card.exp_month;
+      cardExpYear = pm.card.exp_year;
+    }
+  }
+
+  // Determine plan/cap from subscription items
+  const items = stripeSubscription.items?.data || [];
+  let plan = sub.plan, playerCap = sub.player_cap, addonQty = sub.addon_quantity;
+  const billingInterval = stripeSubscription.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly';
+
+  // Load billing config to match price IDs to plans
+  const config = await pool.query('SELECT key, value FROM billing_config');
+  const priceToInfo = {};
+  for (const row of config.rows) {
+    if (row.key.startsWith('addon_player_')) {
+      priceToInfo[row.value] = { type: 'addon' };
+    } else {
+      const parts = row.key.split('_');
+      const interval = parts.pop(); // monthly or annual
+      const planName = parts.join('_'); // team, small_club, large_club, mega_club
+      if (PLAN_CAPS[planName]) {
+        priceToInfo[row.value] = { type: 'plan', plan: planName, cap: PLAN_CAPS[planName] };
+      }
+    }
+  }
+
+  for (const item of items) {
+    const priceId = item.price?.id;
+    const info = priceToInfo[priceId];
+    if (info) {
+      if (info.type === 'plan') {
+        plan = info.plan;
+        playerCap = info.cap;
+      } else if (info.type === 'addon') {
+        addonQty = item.quantity || 0;
+      }
+    }
+  }
+
+  await pool.query(
+    `UPDATE subscriptions SET
+      stripe_customer_id = $1, stripe_subscription_id = $2, status = $3, plan = $4,
+      billing_interval = $5, player_cap = $6, addon_quantity = $7,
+      card_brand = $8, card_last4 = $9, card_exp_month = $10, card_exp_year = $11,
+      current_period_end = $12, trial_end = $13, updated_at = NOW()
+     WHERE id = $14`,
+    [
+      customerId, stripeSubscription.id, status, plan,
+      billingInterval, playerCap, addonQty,
+      cardBrand, cardLast4, cardExpMonth, cardExpYear,
+      stripeSubscription.current_period_end ? new Date(stripeSubscription.current_period_end * 1000) : null,
+      stripeSubscription.trial_end ? new Date(stripeSubscription.trial_end * 1000) : null,
+      sub.id
+    ]
+  );
+
+  // Sync club stub fields for backward compat
+  if (sub.owner_type === 'club') {
+    await pool.query(
+      "UPDATE clubs SET subscription_status = $1, plan = $2, stripe_customer_id = $3, player_limit = $4 WHERE id = $5",
+      [status, plan, customerId, playerCap + addonQty, sub.owner_id]
+    );
+  }
+}
+
+// Webhook handler functions
+async function handleCheckoutCompleted(session) {
+  const { owner_type, owner_id } = session.metadata || {};
+  if (!owner_type || !owner_id) return;
+
+  const subscriptionId = session.subscription;
+  const customerId = session.customer;
+
+  // Update subscription record with Stripe IDs (most recent unlinked record)
+  await pool.query(
+    `UPDATE subscriptions SET stripe_customer_id = $1, stripe_subscription_id = $2, updated_at = NOW()
+     WHERE id = (
+       SELECT id FROM subscriptions
+       WHERE owner_type = $3 AND owner_id = $4 AND stripe_subscription_id IS NULL
+       ORDER BY created_at DESC LIMIT 1
+     )`,
+    [customerId, subscriptionId, owner_type, owner_id]
+  );
+
+  // Update club record
+  if (owner_type === 'club') {
+    await pool.query('UPDATE clubs SET stripe_customer_id = $1 WHERE id = $2', [customerId, owner_id]);
+  }
+
+  await auditLog('system', null, 'checkout_completed', 'subscription', owner_id,
+    { owner_type, stripe_customer_id: customerId, stripe_subscription_id: subscriptionId });
+
+  // Retrieve and sync the full subscription
+  if (subscriptionId) {
+    try {
+      const stripeSub = await stripe.subscriptions.retrieve(subscriptionId, {
+        expand: ['default_payment_method'],
+      });
+      await syncSubscriptionFromStripe(stripeSub);
+    } catch (err) {
+      console.error('Failed to sync subscription after checkout:', err.message);
+    }
+  }
+}
+
+async function handleSubscriptionCreated(subscription) {
+  await syncSubscriptionFromStripe(subscription);
+  const { owner_type, owner_id } = subscription.metadata || {};
+  if (owner_type && owner_id) {
+    await auditLog('system', null, 'subscription_created', 'subscription', owner_id,
+      { owner_type, stripe_subscription_id: subscription.id, plan: subscription.items?.data?.[0]?.price?.lookup_key });
+  }
+}
+
+async function handleSubscriptionUpdated(subscription) {
+  await syncSubscriptionFromStripe(subscription);
+}
+
+async function handleSubscriptionDeleted(subscription) {
+  const result = await pool.query(
+    "UPDATE subscriptions SET status = 'canceled', canceled_at = NOW(), updated_at = NOW() WHERE stripe_subscription_id = $1 RETURNING *",
+    [subscription.id]
+  );
+
+  if (result.rows[0]) {
+    const sub = result.rows[0];
+    // Update club/team status for read-only lock
+    if (sub.owner_type === 'club') {
+      await pool.query("UPDATE clubs SET subscription_status = 'canceled', status = 'suspended' WHERE id = $1", [sub.owner_id]);
+    } else {
+      await pool.query("UPDATE teams SET status = 'suspended' WHERE id = $1", [sub.owner_id]);
+    }
+
+    await auditLog('system', null, 'subscription_canceled', 'subscription', sub.owner_id,
+      { owner_type: sub.owner_type, stripe_subscription_id: subscription.id });
+  }
+}
+
+async function handlePaymentFailed(invoice) {
+  const subId = invoice.subscription;
+  if (!subId) return;
+
+  await pool.query(
+    "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE stripe_subscription_id = $1",
+    [subId]
+  );
+
+  const sub = await pool.query("SELECT * FROM subscriptions WHERE stripe_subscription_id = $1", [subId]);
+  if (sub.rows[0]) {
+    if (sub.rows[0].owner_type === 'club') {
+      await pool.query("UPDATE clubs SET subscription_status = 'past_due' WHERE id = $1", [sub.rows[0].owner_id]);
+    }
+    await sendPaymentFailedEmail(sub.rows[0]);
+    await auditLog('system', null, 'payment_failed', 'subscription', sub.rows[0].owner_id,
+      { owner_type: sub.rows[0].owner_type, invoice_id: invoice.id });
+  }
+}
+
+async function handlePaymentSucceeded(invoice) {
+  const subId = invoice.subscription;
+  if (!subId) return;
+
+  const result = await pool.query(
+    "UPDATE subscriptions SET status = 'active', updated_at = NOW() WHERE stripe_subscription_id = $1 RETURNING *",
+    [subId]
+  );
+
+  if (result.rows[0]) {
+    const sub = result.rows[0];
+    // Unlock: reactivate club/team
+    if (sub.owner_type === 'club') {
+      await pool.query("UPDATE clubs SET subscription_status = 'active', status = 'active' WHERE id = $1", [sub.owner_id]);
+    } else {
+      await pool.query("UPDATE teams SET status = 'active' WHERE id = $1", [sub.owner_id]);
+    }
+    await auditLog('system', null, 'payment_succeeded', 'subscription', sub.owner_id,
+      { owner_type: sub.owner_type, invoice_id: invoice.id });
+  }
+}
+
+async function handleTrialWillEnd(subscription) {
+  const sub = await pool.query(
+    "SELECT * FROM subscriptions WHERE stripe_subscription_id = $1", [subscription.id]
+  );
+  if (sub.rows[0]) {
+    await sendTrialEndingEmail(sub.rows[0]);
+    await auditLog('system', null, 'trial_ending_reminder', 'subscription', sub.rows[0].owner_id,
+      { owner_type: sub.rows[0].owner_type });
+  }
+}
+
+app.post('/api/billing/webhook', async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).json({ error: `Webhook Error: ${err.message}` });
+  }
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        await handleCheckoutCompleted(event.data.object);
+        break;
+      case 'customer.subscription.created':
+        await handleSubscriptionCreated(event.data.object);
+        break;
+      case 'customer.subscription.updated':
+        await handleSubscriptionUpdated(event.data.object);
+        break;
+      case 'customer.subscription.deleted':
+        await handleSubscriptionDeleted(event.data.object);
+        break;
+      case 'invoice.payment_failed':
+        await handlePaymentFailed(event.data.object);
+        break;
+      case 'invoice.payment_succeeded':
+        await handlePaymentSucceeded(event.data.object);
+        break;
+      case 'customer.subscription.trial_will_end':
+        await handleTrialWillEnd(event.data.object);
+        break;
+      default:
+        console.log(`Unhandled Stripe event: ${event.type}`);
+    }
+    res.json({ received: true });
+  } catch (err) {
+    console.error(`Webhook handler error for ${event.type}:`, err);
+    res.status(500).json({ error: 'Webhook handler failed' });
   }
 });
 
@@ -4734,6 +5483,55 @@ async function runBuild4Migrations() {
   console.log('Build 4 migrations complete.');
 }
 
+async function runBuild5Migrations() {
+  // Create subscriptions table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      owner_type VARCHAR(10) NOT NULL CHECK (owner_type IN ('club', 'team')),
+      owner_id UUID NOT NULL,
+      stripe_customer_id VARCHAR(200),
+      stripe_subscription_id VARCHAR(200),
+      plan VARCHAR(50) NOT NULL DEFAULT 'team' CHECK (plan IN ('team', 'small_club', 'large_club', 'mega_club')),
+      billing_interval VARCHAR(10) NOT NULL DEFAULT 'monthly' CHECK (billing_interval IN ('monthly', 'annual')),
+      status VARCHAR(30) NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'past_due', 'suspended', 'canceled')),
+      player_cap INTEGER NOT NULL DEFAULT 20,
+      addon_quantity INTEGER NOT NULL DEFAULT 0,
+      card_brand VARCHAR(50),
+      card_last4 VARCHAR(4),
+      card_exp_month INTEGER,
+      card_exp_year INTEGER,
+      current_period_end TIMESTAMPTZ,
+      trial_end TIMESTAMPTZ,
+      canceled_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_subscriptions_owner ON subscriptions(owner_type, owner_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_cust ON subscriptions(stripe_customer_id)');
+
+  // Create billing_config table (key-value for Stripe price IDs)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS billing_config (
+      key VARCHAR(100) PRIMARY KEY,
+      value VARCHAR(500) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Relax audit_log target_type constraint to include 'subscription'
+  try {
+    await pool.query("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_target_type_check");
+    await pool.query("ALTER TABLE audit_log ADD CONSTRAINT audit_log_target_type_check CHECK (target_type IN ('player', 'team', 'club', 'user', 'invitation', 'season', 'subscription'))");
+  } catch (err) {
+    // Constraint may already be updated
+  }
+
+  console.log('Build 5 migrations complete.');
+}
+
 async function seedAppSettings() {
   const policyContent = `<h1>Daily Reps privacy policy</h1>
 <p>Effective date: June 20, 2026</p>
@@ -5139,6 +5937,7 @@ async function initDatabase() {
       await runBuild2Migrations();
       await runBuild3Migrations();
       await runBuild4Migrations();
+      await runBuild5Migrations();
       await seedAppSettings();
       return;
     }
@@ -5192,6 +5991,7 @@ async function initDatabase() {
         await runBuild2Migrations();
         await runBuild3Migrations();
         await runBuild4Migrations();
+        await runBuild5Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -5222,6 +6022,7 @@ async function initDatabase() {
     await runBuild2Migrations();
     await runBuild3Migrations();
     await runBuild4Migrations();
+    await runBuild5Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {
@@ -5292,6 +6093,32 @@ async function runRetentionJob() {
 
 // Schedule: daily at 3:00 AM UTC
 cron.schedule('0 3 * * *', runRetentionJob);
+
+// Card expiry reminder: daily at 9:00 AM UTC
+cron.schedule('0 9 * * *', async () => {
+  console.log('Running card expiry check...');
+  try {
+    const subs = await pool.query(
+      "SELECT * FROM subscriptions WHERE status IN ('active', 'trialing') AND card_exp_month IS NOT NULL AND card_exp_year IS NOT NULL"
+    );
+
+    const now = new Date();
+    let sent = 0;
+    for (const sub of subs.rows) {
+      // Card expires at end of exp_month/exp_year
+      const expiryDate = new Date(sub.card_exp_year, sub.card_exp_month, 0); // Last day of expiry month
+      const daysUntilExpiry = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
+
+      if (daysUntilExpiry === 30 || daysUntilExpiry === 10 || daysUntilExpiry === 1) {
+        await sendCardExpiryReminderEmail(sub, daysUntilExpiry);
+        sent++;
+      }
+    }
+    if (sent > 0) console.log(`Sent ${sent} card expiry reminder(s).`);
+  } catch (err) {
+    console.error('Card expiry check error:', err);
+  }
+});
 
 // ============================================================
 // START SERVER
