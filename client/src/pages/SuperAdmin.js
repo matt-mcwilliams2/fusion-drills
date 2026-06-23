@@ -119,7 +119,7 @@ function AccountsList({ accounts, totals, onSelect, loading }) {
                   <td>{a.comped ? 'Comped' : `${formatCurrency(a.amount)}/${a.billing_interval === 'annual' ? 'yr' : 'mo'}`}</td>
                   <td>{formatCurrency(a.monthly_equivalent)}</td>
                   <td><StatusBadge status={a.status} comped={a.comped} manuallySuspended={a.manually_suspended} /></td>
-                  <td>{a.player_count} of {a.player_cap}</td>
+                  <td>{a.no_subscription ? a.player_count : `${a.player_count} of ${a.player_cap}`}</td>
                   <td>{a.active_percent}%</td>
                   <td>
                     <div>{formatDate(a.last_activity)}</div>
@@ -302,9 +302,14 @@ function AccountDetail({ accountId, onBack, apiFetch }) {
       {/* Management Actions */}
       <div className="card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginBottom: 12 }}>Actions</h3>
+        {billing.no_subscription && (
+          <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 12 }}>
+            This account has no billing subscription. Billing actions (trial, discount) are not available until a plan is selected.
+          </div>
+        )}
         <div className="super-actions">
           {/* Extend Trial */}
-          {(billing.status === 'trialing' || billing.trial_end) && (
+          {!billing.no_subscription && (billing.status === 'trialing' || billing.trial_end) && (
             <div className="super-action-row">
               <label className="detail-label">Extend trial by</label>
               <input type="number" className="form-input" value={trialDays} onChange={e => setTrialDays(e.target.value)} min={1} max={365} style={{ width: 80 }} />
@@ -320,7 +325,7 @@ function AccountDetail({ accountId, onBack, apiFetch }) {
           )}
 
           {/* Comp / Remove Comp */}
-          <div className="super-action-row">
+          {!billing.no_subscription && <div className="super-action-row">
             {billing.comped ? (
               <button
                 className="btn btn-sm btn-outline"
@@ -338,10 +343,10 @@ function AccountDetail({ accountId, onBack, apiFetch }) {
                 {actionLoading === 'comp' ? 'Comping...' : 'Comp Account'}
               </button>
             )}
-          </div>
+          </div>}
 
           {/* Discount */}
-          {!billing.comped && (
+          {!billing.no_subscription && !billing.comped && (
             <div className="super-action-row">
               {showDiscount ? (
                 <form onSubmit={handleDiscount} className="super-discount-form">

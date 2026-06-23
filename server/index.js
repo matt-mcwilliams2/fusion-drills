@@ -3319,18 +3319,51 @@ const ADDON_PRICES = { monthly: 0.59, annual: 4.99 };
 
 const PLAN_NAMES = { team: 'Team', small_club: 'Small Club', large_club: 'Large Club', mega_club: 'Mega Club' };
 
+// Helper: compute activity stats for an owner (club or team)
+async function getOwnerActivityStats(ownerType, ownerId, weekStartStr, tenDaysAgo) {
+  let activeThisWeek = 0, lastActivity = null;
+  if (ownerType === 'club') {
+    const activeResult = await pool.query(
+      `SELECT COUNT(DISTINCT c.player_id) as cnt
+       FROM completions c JOIN drills d ON d.id = c.drill_id
+       JOIN players p ON p.id = c.player_id
+       JOIN teams t ON t.id = d.team_id
+       WHERE t.club_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
+      [ownerId, weekStartStr]
+    );
+    activeThisWeek = parseInt(activeResult.rows[0]?.cnt || 0);
+    const lastActResult = await pool.query(
+      `SELECT MAX(c.completed_at) as last_active
+       FROM completions c JOIN drills d ON d.id = c.drill_id
+       JOIN teams t ON t.id = d.team_id
+       WHERE t.club_id = $1`,
+      [ownerId]
+    );
+    lastActivity = lastActResult.rows[0]?.last_active || null;
+  } else {
+    const activeResult = await pool.query(
+      `SELECT COUNT(DISTINCT c.player_id) as cnt
+       FROM completions c JOIN drills d ON d.id = c.drill_id
+       JOIN players p ON p.id = c.player_id
+       WHERE d.team_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
+      [ownerId, weekStartStr]
+    );
+    activeThisWeek = parseInt(activeResult.rows[0]?.cnt || 0);
+    const lastActResult = await pool.query(
+      `SELECT MAX(c.completed_at) as last_active
+       FROM completions c JOIN drills d ON d.id = c.drill_id
+       WHERE d.team_id = $1`,
+      [ownerId]
+    );
+    lastActivity = lastActResult.rows[0]?.last_active || null;
+  }
+  const isDormant = !lastActivity || new Date(lastActivity) < tenDaysAgo;
+  return { activeThisWeek, lastActivity, isDormant };
+}
+
 // GET /api/super/accounts — Full accounts list with billing + activity data
 app.get('/api/super/accounts', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
   try {
-    // Get all subscriptions (each represents a billing account)
-    const subsResult = await pool.query(`
-      SELECT s.*,
-        CASE WHEN s.owner_type = 'club' THEN (SELECT name FROM clubs WHERE id = s.owner_id)
-             ELSE (SELECT name FROM teams WHERE id = s.owner_id) END as account_name
-      FROM subscriptions s
-      ORDER BY s.created_at DESC
-    `);
-
     const now = new Date();
     const dayOfWeek = now.getUTCDay();
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
@@ -3344,74 +3377,38 @@ app.get('/api/super/accounts', authenticate, rejectImpersonation, requireRole('s
     let totalActiveAccounts = 0;
     let totalMRR = 0;
     const accounts = [];
+    const seenOwners = new Set(); // track owner_type:owner_id to avoid duplicates
+
+    // 1. Accounts with subscriptions
+    const subsResult = await pool.query(`
+      SELECT s.*,
+        CASE WHEN s.owner_type = 'club' THEN (SELECT name FROM clubs WHERE id = s.owner_id)
+             ELSE (SELECT name FROM teams WHERE id = s.owner_id) END as account_name
+      FROM subscriptions s
+      ORDER BY s.created_at DESC
+    `);
 
     for (const sub of subsResult.rows) {
-      // Player count
+      seenOwners.add(`${sub.owner_type}:${sub.owner_id}`);
       const playerCount = await getActivePlayerCount(sub.owner_type, sub.owner_id);
       const effectiveCap = sub.player_cap + sub.addon_quantity;
 
-      // Calculate amount and monthly equivalent
       const planPrices = PLAN_PRICES[sub.plan] || { monthly: 0, annual: 0 };
-      const addonPrices = ADDON_PRICES;
       let amount, monthlyEquivalent;
       if (sub.comped_at) {
         amount = 0;
         monthlyEquivalent = 0;
       } else if (sub.billing_interval === 'annual') {
-        const basePlanPrice = planPrices.annual;
-        const addonTotal = (sub.addon_quantity || 0) * addonPrices.annual;
-        amount = basePlanPrice + addonTotal;
+        amount = planPrices.annual + (sub.addon_quantity || 0) * ADDON_PRICES.annual;
         monthlyEquivalent = Math.round((amount / 12) * 100) / 100;
       } else {
-        const basePlanPrice = planPrices.monthly;
-        const addonTotal = (sub.addon_quantity || 0) * addonPrices.monthly;
-        amount = basePlanPrice + addonTotal;
+        amount = planPrices.monthly + (sub.addon_quantity || 0) * ADDON_PRICES.monthly;
         monthlyEquivalent = amount;
       }
 
-      // Activity: players active this week
-      let activeThisWeek = 0;
-      let lastActivity = null;
-      if (sub.owner_type === 'club') {
-        const activeResult = await pool.query(
-          `SELECT COUNT(DISTINCT c.player_id) as cnt
-           FROM completions c JOIN drills d ON d.id = c.drill_id
-           JOIN players p ON p.id = c.player_id
-           JOIN teams t ON t.id = d.team_id
-           WHERE t.club_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
-          [sub.owner_id, weekStartStr]
-        );
-        activeThisWeek = parseInt(activeResult.rows[0]?.cnt || 0);
-        const lastActResult = await pool.query(
-          `SELECT MAX(c.completed_at) as last_active
-           FROM completions c JOIN drills d ON d.id = c.drill_id
-           JOIN teams t ON t.id = d.team_id
-           WHERE t.club_id = $1`,
-          [sub.owner_id]
-        );
-        lastActivity = lastActResult.rows[0]?.last_active || null;
-      } else {
-        const activeResult = await pool.query(
-          `SELECT COUNT(DISTINCT c.player_id) as cnt
-           FROM completions c JOIN drills d ON d.id = c.drill_id
-           JOIN players p ON p.id = c.player_id
-           WHERE d.team_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
-          [sub.owner_id, weekStartStr]
-        );
-        activeThisWeek = parseInt(activeResult.rows[0]?.cnt || 0);
-        const lastActResult = await pool.query(
-          `SELECT MAX(c.completed_at) as last_active
-           FROM completions c JOIN drills d ON d.id = c.drill_id
-           WHERE d.team_id = $1`,
-          [sub.owner_id]
-        );
-        lastActivity = lastActResult.rows[0]?.last_active || null;
-      }
-
+      const { activeThisWeek, lastActivity, isDormant } = await getOwnerActivityStats(sub.owner_type, sub.owner_id, weekStartStr, tenDaysAgo);
       const activePercent = playerCount > 0 ? Math.round((activeThisWeek / playerCount) * 100) : 0;
-      const isDormant = !lastActivity || new Date(lastActivity) < tenDaysAgo;
 
-      // Count toward totals for active/trialing
       if (['active', 'trialing'].includes(sub.status) || sub.comped_at) {
         totalActiveAccounts++;
         totalMRR += monthlyEquivalent;
@@ -3441,6 +3438,83 @@ app.get('/api/super/accounts', authenticate, rejectImpersonation, requireRole('s
       });
     }
 
+    // 2. Clubs without a subscription row (created via super admin before billing existed)
+    const clubsResult = await pool.query("SELECT id, name, status, created_at FROM clubs ORDER BY created_at DESC");
+    for (const club of clubsResult.rows) {
+      if (seenOwners.has(`club:${club.id}`)) continue;
+      const playerCount = await getActivePlayerCount('club', club.id);
+      const { activeThisWeek, lastActivity, isDormant } = await getOwnerActivityStats('club', club.id, weekStartStr, tenDaysAgo);
+      const activePercent = playerCount > 0 ? Math.round((activeThisWeek / playerCount) * 100) : 0;
+
+      // Clubs without subscriptions count as active if their status is active
+      if (club.status === 'active') {
+        totalActiveAccounts++;
+      }
+
+      accounts.push({
+        id: `club_${club.id}`, // synthetic id — no subscription row
+        owner_type: 'club',
+        owner_id: club.id,
+        account_name: club.name,
+        plan: null,
+        plan_name: 'No plan',
+        billing_interval: null,
+        status: club.status === 'active' ? 'active' : club.status,
+        amount: 0,
+        monthly_equivalent: 0,
+        player_count: playerCount,
+        player_cap: '—',
+        active_this_week: activeThisWeek,
+        active_percent: activePercent,
+        last_activity: lastActivity,
+        dormant: isDormant,
+        comped: false,
+        manually_suspended: false,
+        trial_end: null,
+        created_at: club.created_at,
+        no_subscription: true,
+      });
+    }
+
+    // 3. Standalone teams without a subscription row and not belonging to any club
+    const standaloneTeamsResult = await pool.query(
+      "SELECT id, name, status, created_at FROM teams WHERE club_id IS NULL ORDER BY created_at DESC"
+    );
+    for (const team of standaloneTeamsResult.rows) {
+      if (seenOwners.has(`team:${team.id}`)) continue;
+      const playerCount = await getActivePlayerCount('team', team.id);
+      const { activeThisWeek, lastActivity, isDormant } = await getOwnerActivityStats('team', team.id, weekStartStr, tenDaysAgo);
+      const activePercent = playerCount > 0 ? Math.round((activeThisWeek / playerCount) * 100) : 0;
+
+      if (team.status === 'active') {
+        totalActiveAccounts++;
+      }
+
+      accounts.push({
+        id: `team_${team.id}`,
+        owner_type: 'team',
+        owner_id: team.id,
+        account_name: team.name,
+        plan: null,
+        plan_name: 'No plan',
+        billing_interval: null,
+        status: team.status === 'active' ? 'active' : team.status,
+        amount: 0,
+        monthly_equivalent: 0,
+        player_count: playerCount,
+        player_cap: '—',
+        active_this_week: activeThisWeek,
+        active_percent: activePercent,
+        last_activity: lastActivity,
+        dormant: isDormant,
+        comped: false,
+        manually_suspended: false,
+        trial_end: null,
+        created_at: team.created_at,
+        no_subscription: true,
+      });
+    }
+
     totalMRR = Math.round(totalMRR * 100) / 100;
 
     res.json({ accounts, totals: { active_accounts: totalActiveAccounts, mrr: totalMRR } });
@@ -3451,53 +3525,96 @@ app.get('/api/super/accounts', authenticate, rejectImpersonation, requireRole('s
 });
 
 // GET /api/super/accounts/:id — Account detail with billing summary + teams + engagement
+// Handles both real subscription IDs and synthetic IDs (club_<uuid> or team_<uuid>) for accounts without subscriptions
 app.get('/api/super/accounts/:id', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
   try {
-    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
-    if (sub.rows.length === 0) return res.status(404).json({ error: 'Account not found' });
-    const s = sub.rows[0];
+    const paramId = req.params.id;
+    let s = null; // subscription row (may be null)
+    let ownerType, ownerId, accountName;
+    let noSubscription = false;
 
-    // Account name
-    let accountName;
-    if (s.owner_type === 'club') {
-      const club = await pool.query('SELECT name FROM clubs WHERE id = $1', [s.owner_id]);
-      accountName = club.rows[0]?.name;
+    // Check if this is a synthetic ID for accounts without subscriptions
+    if (paramId.startsWith('club_') || paramId.startsWith('team_')) {
+      noSubscription = true;
+      ownerType = paramId.startsWith('club_') ? 'club' : 'team';
+      ownerId = paramId.replace(/^(club_|team_)/, '');
+      if (ownerType === 'club') {
+        const club = await pool.query('SELECT name, status FROM clubs WHERE id = $1', [ownerId]);
+        if (club.rows.length === 0) return res.status(404).json({ error: 'Club not found' });
+        accountName = club.rows[0].name;
+      } else {
+        const team = await pool.query('SELECT name, status FROM teams WHERE id = $1', [ownerId]);
+        if (team.rows.length === 0) return res.status(404).json({ error: 'Team not found' });
+        accountName = team.rows[0].name;
+      }
     } else {
-      const team = await pool.query('SELECT name FROM teams WHERE id = $1', [s.owner_id]);
-      accountName = team.rows[0]?.name;
+      const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [paramId]);
+      if (sub.rows.length === 0) return res.status(404).json({ error: 'Account not found' });
+      s = sub.rows[0];
+      ownerType = s.owner_type;
+      ownerId = s.owner_id;
+      if (ownerType === 'club') {
+        const club = await pool.query('SELECT name FROM clubs WHERE id = $1', [ownerId]);
+        accountName = club.rows[0]?.name;
+      } else {
+        const team = await pool.query('SELECT name FROM teams WHERE id = $1', [ownerId]);
+        accountName = team.rows[0]?.name;
+      }
     }
 
     // Billing summary
-    const planPrices = PLAN_PRICES[s.plan] || { monthly: 0, annual: 0 };
-    let amount;
-    if (s.comped_at) {
-      amount = 0;
-    } else if (s.billing_interval === 'annual') {
-      amount = planPrices.annual + (s.addon_quantity || 0) * ADDON_PRICES.annual;
+    let billing;
+    if (s) {
+      const planPrices = PLAN_PRICES[s.plan] || { monthly: 0, annual: 0 };
+      let amount;
+      if (s.comped_at) {
+        amount = 0;
+      } else if (s.billing_interval === 'annual') {
+        amount = planPrices.annual + (s.addon_quantity || 0) * ADDON_PRICES.annual;
+      } else {
+        amount = planPrices.monthly + (s.addon_quantity || 0) * ADDON_PRICES.monthly;
+      }
+      billing = {
+        plan: s.plan,
+        plan_name: PLAN_NAMES[s.plan] || s.plan,
+        billing_interval: s.billing_interval,
+        amount,
+        status: s.status,
+        current_period_end: s.current_period_end,
+        trial_end: s.trial_end,
+        card_brand: s.card_brand,
+        card_last4: s.card_last4,
+        comped: !!s.comped_at,
+        comped_at: s.comped_at,
+        manually_suspended: s.manually_suspended || false,
+        addon_quantity: s.addon_quantity,
+        player_cap: s.player_cap + s.addon_quantity,
+        stripe_customer_id: s.stripe_customer_id,
+        stripe_subscription_id: s.stripe_subscription_id,
+      };
     } else {
-      amount = planPrices.monthly + (s.addon_quantity || 0) * ADDON_PRICES.monthly;
+      billing = {
+        plan: null,
+        plan_name: 'No plan',
+        billing_interval: null,
+        amount: 0,
+        status: 'active',
+        current_period_end: null,
+        trial_end: null,
+        card_brand: null,
+        card_last4: null,
+        comped: false,
+        comped_at: null,
+        manually_suspended: false,
+        addon_quantity: 0,
+        player_cap: '—',
+        stripe_customer_id: null,
+        stripe_subscription_id: null,
+        no_subscription: true,
+      };
     }
 
-    const billing = {
-      plan: s.plan,
-      plan_name: PLAN_NAMES[s.plan] || s.plan,
-      billing_interval: s.billing_interval,
-      amount,
-      status: s.status,
-      current_period_end: s.current_period_end,
-      trial_end: s.trial_end,
-      card_brand: s.card_brand,
-      card_last4: s.card_last4,
-      comped: !!s.comped_at,
-      comped_at: s.comped_at,
-      manually_suspended: s.manually_suspended || false,
-      addon_quantity: s.addon_quantity,
-      player_cap: s.player_cap + s.addon_quantity,
-      stripe_customer_id: s.stripe_customer_id,
-      stripe_subscription_id: s.stripe_subscription_id,
-    };
-
-    // Teams list (for clubs, list all teams; for standalone, just the one team)
+    // Teams list
     const now = new Date();
     const dayOfWeek = now.getUTCDay();
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
@@ -3509,9 +3626,9 @@ app.get('/api/super/accounts/:id', authenticate, rejectImpersonation, requireRol
     tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
 
     let teams = [];
-    const teamQuery = s.owner_type === 'club'
-      ? await pool.query("SELECT id, name, status FROM teams WHERE club_id = $1 ORDER BY name", [s.owner_id])
-      : await pool.query("SELECT id, name, status FROM teams WHERE id = $1", [s.owner_id]);
+    const teamQuery = ownerType === 'club'
+      ? await pool.query("SELECT id, name, status FROM teams WHERE club_id = $1 ORDER BY name", [ownerId])
+      : await pool.query("SELECT id, name, status FROM teams WHERE id = $1", [ownerId]);
 
     let totalPlayers = 0;
     let totalActiveThisWeek = 0;
@@ -3542,7 +3659,6 @@ app.get('/api/super/accounts/:id', authenticate, rejectImpersonation, requireRol
       );
       const lastAct = lastActResult.rows[0]?.last_active || null;
 
-      // Completion rate for active season
       const seasonResult = await pool.query(
         "SELECT * FROM seasons WHERE team_id = $1 AND status = 'active' LIMIT 1", [team.id]
       );
@@ -3589,22 +3705,21 @@ app.get('/api/super/accounts/:id', authenticate, rejectImpersonation, requireRol
 
     // Impersonatable users (club_admin and coaches for this account)
     let impersonatableUsers = [];
-    if (s.owner_type === 'club') {
+    if (ownerType === 'club') {
       const users = await pool.query(
         `SELECT id, email, role, first_name, last_name FROM users
          WHERE club_id = $1 AND status = 'active' AND role IN ('club_admin', 'coach')
          ORDER BY role, last_name`,
-        [s.owner_id]
+        [ownerId]
       );
       impersonatableUsers = users.rows;
     } else {
-      // Standalone team: get coaches assigned to this team
       const users = await pool.query(
         `SELECT u.id, u.email, u.role, u.first_name, u.last_name
          FROM users u JOIN coach_teams ct ON ct.user_id = u.id
          WHERE ct.team_id = $1 AND u.status = 'active'
          ORDER BY u.last_name`,
-        [s.owner_id]
+        [ownerId]
       );
       impersonatableUsers = users.rows;
     }
@@ -3615,6 +3730,7 @@ app.get('/api/super/accounts/:id', authenticate, rejectImpersonation, requireRol
       teams,
       engagement,
       impersonatable_users: impersonatableUsers,
+      no_subscription: noSubscription,
     });
   } catch (err) {
     console.error('Super account detail error:', err);
