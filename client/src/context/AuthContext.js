@@ -11,6 +11,7 @@ export function AuthProvider({ children }) {
   const [teams, setTeams] = useState([]);
   const [activeTeamId, setActiveTeamIdState] = useState(localStorage.getItem('activeTeamId'));
   const [teamInfo, setTeamInfo] = useState(null); // For player: their team info
+  const [impersonating, setImpersonating] = useState(null); // { name, real_token }
 
   useEffect(() => {
     if (token) {
@@ -31,6 +32,10 @@ export function AuthProvider({ children }) {
           if (data.team) {
             setTeamInfo(data.team);
           }
+          // Track impersonation state from server response
+          if (data.impersonating) {
+            setImpersonating(prev => prev ? { ...prev, real_user_name: data.real_user_name } : null);
+          }
           setLoading(false);
         })
         .catch(() => {
@@ -40,6 +45,7 @@ export function AuthProvider({ children }) {
           setUser(null);
           setTeams([]);
           setTeamInfo(null);
+          setImpersonating(null);
           setLoading(false);
         });
     } else {
@@ -112,6 +118,51 @@ export function AuthProvider({ children }) {
     setTeams([]);
     setTeamInfo(null);
     setActiveTeamIdState(null);
+    setImpersonating(null);
+  };
+
+  // Start impersonation: save real token, switch to impersonation token
+  const startImpersonation = (impersonationToken, targetUser, targetTeams) => {
+    const realToken = token;
+    setImpersonating({
+      name: `${targetUser.first_name} ${targetUser.last_name}`,
+      real_token: realToken,
+      impersonated_user_id: targetUser.id,
+    });
+    localStorage.setItem('token', impersonationToken);
+    setToken(impersonationToken);
+    setUser(targetUser);
+    setTeams(targetTeams || []);
+    if (targetTeams && targetTeams.length > 0) {
+      setActiveTeamIdState(targetTeams[0].id);
+      localStorage.setItem('activeTeamId', targetTeams[0].id);
+    }
+  };
+
+  // End impersonation: restore real token and navigate back
+  const endImpersonation = async () => {
+    if (!impersonating) return;
+    const realToken = impersonating.real_token;
+    const impersonatedUserId = impersonating.impersonated_user_id;
+
+    // Log end of impersonation
+    try {
+      await fetch(`${API_BASE}/api/super/impersonate/end`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${realToken}`,
+        },
+        body: JSON.stringify({ impersonated_user_id: impersonatedUserId }),
+      });
+    } catch (err) {
+      console.error('End impersonation audit error:', err);
+    }
+
+    setImpersonating(null);
+    localStorage.setItem('token', realToken);
+    setToken(realToken);
+    // The useEffect on token change will re-fetch /api/auth/me and restore user/teams
   };
 
   const setActiveTeam = (teamId) => {
@@ -150,6 +201,7 @@ export function AuthProvider({ children }) {
       apiFetch,
       teams, activeTeamId, activeTeam, setActiveTeam,
       teamInfo,
+      impersonating, startImpersonation, endImpersonation,
     }}>
       {children}
     </AuthContext.Provider>

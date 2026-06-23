@@ -136,6 +136,17 @@ function authenticate(req, res, next) {
     if (decoded.role === 'player') {
       req.teamId = decoded.team_id;
     }
+    // Handle impersonation tokens
+    if (decoded.impersonating) {
+      // Block writes server-side during impersonation
+      if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+        return res.status(403).json({ error: 'Read-only mode: writes are blocked during impersonation.' });
+      }
+      req.isImpersonating = true;
+      req.realUser = { id: decoded.real_user_id, role: 'super_admin' };
+      // Set role to the impersonated user's role for RBAC
+      req.role = decoded.impersonated_role;
+    }
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
@@ -447,6 +458,18 @@ async function sendCardExpiryReminderEmail(subscription, daysUntilExpiry) {
 <p>Please update your payment method to avoid service interruption.</p>
 <p><a href="${APP_URL}/club?tab=billing">Update Payment Method</a></p>`;
   await sendEmail(email, `Daily Reps: Card expires in ${daysUntilExpiry} days`, html);
+}
+
+// ============================================================
+// IMPERSONATION MIDDLEWARE
+// ============================================================
+
+// Reject impersonation tokens on super admin routes
+function rejectImpersonation(req, res, next) {
+  if (req.user && req.user.impersonating) {
+    return res.status(403).json({ error: 'Cannot access super admin routes while impersonating.' });
+  }
+  next();
 }
 
 // Middleware: block write operations when subscription is suspended or canceled
@@ -1223,7 +1246,16 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
       teams = teamsResult.rows;
     }
 
-    res.json({ user: userData, teams });
+    const response = { user: userData, teams };
+
+    // Include impersonation info if present
+    if (req.isImpersonating) {
+      response.impersonating = true;
+      response.real_user_id = req.realUser.id;
+      response.real_user_name = req.user.real_user_name;
+    }
+
+    res.json(response);
   } catch (err) {
     console.error('Auth me error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -3202,7 +3234,7 @@ app.get('/api/privacy-policy', async (req, res) => {
 // ============================================================
 
 // List all clubs
-app.get('/api/super/clubs', authenticate, requireRole('super_admin'), async (req, res) => {
+app.get('/api/super/clubs', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
   try {
     const clubs = await pool.query(`
       SELECT c.*,
@@ -3218,7 +3250,7 @@ app.get('/api/super/clubs', authenticate, requireRole('super_admin'), async (req
 });
 
 // Create club + invite club admin
-app.post('/api/super/clubs', authenticate, requireRole('super_admin'), async (req, res) => {
+app.post('/api/super/clubs', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
   const client = await pool.connect();
   try {
     const { club_name, admin_email, admin_first_name, admin_last_name } = req.body;
@@ -3269,6 +3301,639 @@ app.post('/api/super/clubs', authenticate, requireRole('super_admin'), async (re
     res.status(500).json({ error: 'Server error' });
   } finally {
     client.release();
+  }
+});
+
+// ============================================================
+// BUILD 6: SUPER ADMIN DASHBOARD ENDPOINTS
+// ============================================================
+
+// Plan pricing for display and monthly-equivalent calculation
+const PLAN_PRICES = {
+  team:       { monthly: 9.99,   annual: 79.99 },
+  small_club: { monthly: 74.99,  annual: 649.99 },
+  large_club: { monthly: 179.99, annual: 1499.99 },
+  mega_club:  { monthly: 349.99, annual: 2899.99 },
+};
+const ADDON_PRICES = { monthly: 0.59, annual: 4.99 };
+
+const PLAN_NAMES = { team: 'Team', small_club: 'Small Club', large_club: 'Large Club', mega_club: 'Mega Club' };
+
+// GET /api/super/accounts — Full accounts list with billing + activity data
+app.get('/api/super/accounts', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    // Get all subscriptions (each represents a billing account)
+    const subsResult = await pool.query(`
+      SELECT s.*,
+        CASE WHEN s.owner_type = 'club' THEN (SELECT name FROM clubs WHERE id = s.owner_id)
+             ELSE (SELECT name FROM teams WHERE id = s.owner_id) END as account_name
+      FROM subscriptions s
+      ORDER BY s.created_at DESC
+    `);
+
+    const now = new Date();
+    const dayOfWeek = now.getUTCDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const weekStart = new Date(now);
+    weekStart.setUTCDate(now.getUTCDate() + mondayOffset);
+    weekStart.setUTCHours(0, 0, 0, 0);
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+    const tenDaysAgo = new Date(now);
+    tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+
+    let totalActiveAccounts = 0;
+    let totalMRR = 0;
+    const accounts = [];
+
+    for (const sub of subsResult.rows) {
+      // Player count
+      const playerCount = await getActivePlayerCount(sub.owner_type, sub.owner_id);
+      const effectiveCap = sub.player_cap + sub.addon_quantity;
+
+      // Calculate amount and monthly equivalent
+      const planPrices = PLAN_PRICES[sub.plan] || { monthly: 0, annual: 0 };
+      const addonPrices = ADDON_PRICES;
+      let amount, monthlyEquivalent;
+      if (sub.comped_at) {
+        amount = 0;
+        monthlyEquivalent = 0;
+      } else if (sub.billing_interval === 'annual') {
+        const basePlanPrice = planPrices.annual;
+        const addonTotal = (sub.addon_quantity || 0) * addonPrices.annual;
+        amount = basePlanPrice + addonTotal;
+        monthlyEquivalent = Math.round((amount / 12) * 100) / 100;
+      } else {
+        const basePlanPrice = planPrices.monthly;
+        const addonTotal = (sub.addon_quantity || 0) * addonPrices.monthly;
+        amount = basePlanPrice + addonTotal;
+        monthlyEquivalent = amount;
+      }
+
+      // Activity: players active this week
+      let activeThisWeek = 0;
+      let lastActivity = null;
+      if (sub.owner_type === 'club') {
+        const activeResult = await pool.query(
+          `SELECT COUNT(DISTINCT c.player_id) as cnt
+           FROM completions c JOIN drills d ON d.id = c.drill_id
+           JOIN players p ON p.id = c.player_id
+           JOIN teams t ON t.id = d.team_id
+           WHERE t.club_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
+          [sub.owner_id, weekStartStr]
+        );
+        activeThisWeek = parseInt(activeResult.rows[0]?.cnt || 0);
+        const lastActResult = await pool.query(
+          `SELECT MAX(c.completed_at) as last_active
+           FROM completions c JOIN drills d ON d.id = c.drill_id
+           JOIN teams t ON t.id = d.team_id
+           WHERE t.club_id = $1`,
+          [sub.owner_id]
+        );
+        lastActivity = lastActResult.rows[0]?.last_active || null;
+      } else {
+        const activeResult = await pool.query(
+          `SELECT COUNT(DISTINCT c.player_id) as cnt
+           FROM completions c JOIN drills d ON d.id = c.drill_id
+           JOIN players p ON p.id = c.player_id
+           WHERE d.team_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
+          [sub.owner_id, weekStartStr]
+        );
+        activeThisWeek = parseInt(activeResult.rows[0]?.cnt || 0);
+        const lastActResult = await pool.query(
+          `SELECT MAX(c.completed_at) as last_active
+           FROM completions c JOIN drills d ON d.id = c.drill_id
+           WHERE d.team_id = $1`,
+          [sub.owner_id]
+        );
+        lastActivity = lastActResult.rows[0]?.last_active || null;
+      }
+
+      const activePercent = playerCount > 0 ? Math.round((activeThisWeek / playerCount) * 100) : 0;
+      const isDormant = !lastActivity || new Date(lastActivity) < tenDaysAgo;
+
+      // Count toward totals for active/trialing
+      if (['active', 'trialing'].includes(sub.status) || sub.comped_at) {
+        totalActiveAccounts++;
+        totalMRR += monthlyEquivalent;
+      }
+
+      accounts.push({
+        id: sub.id,
+        owner_type: sub.owner_type,
+        owner_id: sub.owner_id,
+        account_name: sub.account_name || '(unnamed)',
+        plan: sub.plan,
+        plan_name: PLAN_NAMES[sub.plan] || sub.plan,
+        billing_interval: sub.billing_interval,
+        status: sub.status,
+        amount,
+        monthly_equivalent: monthlyEquivalent,
+        player_count: playerCount,
+        player_cap: effectiveCap,
+        active_this_week: activeThisWeek,
+        active_percent: activePercent,
+        last_activity: lastActivity,
+        dormant: isDormant,
+        comped: !!sub.comped_at,
+        manually_suspended: sub.manually_suspended || false,
+        trial_end: sub.trial_end,
+        created_at: sub.created_at,
+      });
+    }
+
+    totalMRR = Math.round(totalMRR * 100) / 100;
+
+    res.json({ accounts, totals: { active_accounts: totalActiveAccounts, mrr: totalMRR } });
+  } catch (err) {
+    console.error('Super accounts list error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/super/accounts/:id — Account detail with billing summary + teams + engagement
+app.get('/api/super/accounts/:id', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Account not found' });
+    const s = sub.rows[0];
+
+    // Account name
+    let accountName;
+    if (s.owner_type === 'club') {
+      const club = await pool.query('SELECT name FROM clubs WHERE id = $1', [s.owner_id]);
+      accountName = club.rows[0]?.name;
+    } else {
+      const team = await pool.query('SELECT name FROM teams WHERE id = $1', [s.owner_id]);
+      accountName = team.rows[0]?.name;
+    }
+
+    // Billing summary
+    const planPrices = PLAN_PRICES[s.plan] || { monthly: 0, annual: 0 };
+    let amount;
+    if (s.comped_at) {
+      amount = 0;
+    } else if (s.billing_interval === 'annual') {
+      amount = planPrices.annual + (s.addon_quantity || 0) * ADDON_PRICES.annual;
+    } else {
+      amount = planPrices.monthly + (s.addon_quantity || 0) * ADDON_PRICES.monthly;
+    }
+
+    const billing = {
+      plan: s.plan,
+      plan_name: PLAN_NAMES[s.plan] || s.plan,
+      billing_interval: s.billing_interval,
+      amount,
+      status: s.status,
+      current_period_end: s.current_period_end,
+      trial_end: s.trial_end,
+      card_brand: s.card_brand,
+      card_last4: s.card_last4,
+      comped: !!s.comped_at,
+      comped_at: s.comped_at,
+      manually_suspended: s.manually_suspended || false,
+      addon_quantity: s.addon_quantity,
+      player_cap: s.player_cap + s.addon_quantity,
+      stripe_customer_id: s.stripe_customer_id,
+      stripe_subscription_id: s.stripe_subscription_id,
+    };
+
+    // Teams list (for clubs, list all teams; for standalone, just the one team)
+    const now = new Date();
+    const dayOfWeek = now.getUTCDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const weekStart = new Date(now);
+    weekStart.setUTCDate(now.getUTCDate() + mondayOffset);
+    weekStart.setUTCHours(0, 0, 0, 0);
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+    const tenDaysAgo = new Date(now);
+    tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+
+    let teams = [];
+    const teamQuery = s.owner_type === 'club'
+      ? await pool.query("SELECT id, name, status FROM teams WHERE club_id = $1 ORDER BY name", [s.owner_id])
+      : await pool.query("SELECT id, name, status FROM teams WHERE id = $1", [s.owner_id]);
+
+    let totalPlayers = 0;
+    let totalActiveThisWeek = 0;
+    let totalCompletions = 0;
+    let totalPossible = 0;
+
+    for (const team of teamQuery.rows) {
+      const pcResult = await pool.query(
+        "SELECT COUNT(*) as cnt FROM players WHERE team_id = $1 AND status = 'active'",
+        [team.id]
+      );
+      const pc = parseInt(pcResult.rows[0]?.cnt || 0);
+      totalPlayers += pc;
+
+      const activeResult = await pool.query(
+        `SELECT COUNT(DISTINCT c.player_id) as cnt
+         FROM completions c JOIN drills d ON d.id = c.drill_id
+         JOIN players p ON p.id = c.player_id
+         WHERE d.team_id = $1 AND c.completed_at >= $2 AND p.status = 'active'`,
+        [team.id, weekStartStr]
+      );
+      const activeCount = parseInt(activeResult.rows[0]?.cnt || 0);
+      totalActiveThisWeek += activeCount;
+
+      const lastActResult = await pool.query(
+        `SELECT MAX(c.completed_at) as last_active FROM completions c JOIN drills d ON d.id = c.drill_id WHERE d.team_id = $1`,
+        [team.id]
+      );
+      const lastAct = lastActResult.rows[0]?.last_active || null;
+
+      // Completion rate for active season
+      const seasonResult = await pool.query(
+        "SELECT * FROM seasons WHERE team_id = $1 AND status = 'active' LIMIT 1", [team.id]
+      );
+      let completionRate = 0;
+      if (seasonResult.rows[0]) {
+        const season = seasonResult.rows[0];
+        const endDate = effectiveEndDate(season);
+        const drillsCount = await pool.query(
+          'SELECT COUNT(*) as cnt FROM drills WHERE team_id = $1 AND date BETWEEN $2 AND $3 AND date <= CURRENT_DATE',
+          [team.id, season.start_date, endDate]
+        );
+        const dc = parseInt(drillsCount.rows[0]?.cnt || 0);
+        totalPossible += dc * pc;
+        const compsCount = await pool.query(
+          `SELECT COUNT(c.id) as cnt FROM completions c JOIN drills d ON d.id = c.drill_id
+           JOIN players p ON p.id = c.player_id
+           WHERE d.team_id = $1 AND d.date BETWEEN $2 AND $3 AND p.status = 'active'`,
+          [team.id, season.start_date, endDate]
+        );
+        const cc = parseInt(compsCount.rows[0]?.cnt || 0);
+        totalCompletions += cc;
+        completionRate = (dc * pc) > 0 ? Math.round((cc / (dc * pc)) * 100) : 0;
+      }
+
+      teams.push({
+        id: team.id,
+        name: team.name,
+        status: team.status,
+        player_count: pc,
+        active_this_week: activeCount,
+        last_activity: lastAct,
+        dormant: !lastAct || new Date(lastAct) < tenDaysAgo,
+        completion_rate: completionRate,
+      });
+    }
+
+    const engagement = {
+      total_players: totalPlayers,
+      active_this_week: totalActiveThisWeek,
+      active_percent: totalPlayers > 0 ? Math.round((totalActiveThisWeek / totalPlayers) * 100) : 0,
+      completion_rate: totalPossible > 0 ? Math.round((totalCompletions / totalPossible) * 100) : 0,
+      dormant_teams: teams.filter(t => t.dormant).length,
+    };
+
+    // Impersonatable users (club_admin and coaches for this account)
+    let impersonatableUsers = [];
+    if (s.owner_type === 'club') {
+      const users = await pool.query(
+        `SELECT id, email, role, first_name, last_name FROM users
+         WHERE club_id = $1 AND status = 'active' AND role IN ('club_admin', 'coach')
+         ORDER BY role, last_name`,
+        [s.owner_id]
+      );
+      impersonatableUsers = users.rows;
+    } else {
+      // Standalone team: get coaches assigned to this team
+      const users = await pool.query(
+        `SELECT u.id, u.email, u.role, u.first_name, u.last_name
+         FROM users u JOIN coach_teams ct ON ct.user_id = u.id
+         WHERE ct.team_id = $1 AND u.status = 'active'
+         ORDER BY u.last_name`,
+        [s.owner_id]
+      );
+      impersonatableUsers = users.rows;
+    }
+
+    res.json({
+      account_name: accountName,
+      billing,
+      teams,
+      engagement,
+      impersonatable_users: impersonatableUsers,
+    });
+  } catch (err) {
+    console.error('Super account detail error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/impersonate — Start impersonation session
+app.post('/api/super/impersonate', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+
+    const targetUser = await pool.query(
+      "SELECT id, email, role, first_name, last_name, club_id FROM users WHERE id = $1 AND status = 'active'",
+      [user_id]
+    );
+    if (targetUser.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const target = targetUser.rows[0];
+
+    if (!['club_admin', 'coach'].includes(target.role)) {
+      return res.status(400).json({ error: 'Can only impersonate club_admin or coach users' });
+    }
+
+    // Get teams for the impersonated user
+    let teams = [];
+    if (target.role === 'club_admin') {
+      const teamsResult = await pool.query(
+        "SELECT id, name, join_code, primary_color, logo_url FROM teams WHERE club_id = $1 AND status = 'active' ORDER BY name",
+        [target.club_id]
+      );
+      teams = teamsResult.rows;
+    } else {
+      const teamsResult = await pool.query(
+        `SELECT t.id, t.name, t.join_code, t.primary_color, t.logo_url
+         FROM teams t JOIN coach_teams ct ON ct.team_id = t.id
+         WHERE ct.user_id = $1 AND t.status = 'active' ORDER BY t.name`,
+        [target.id]
+      );
+      teams = teamsResult.rows;
+    }
+
+    // Create short-lived impersonation token (30 minutes)
+    const impersonationToken = jwt.sign(
+      {
+        id: target.id,
+        email: target.email,
+        role: target.role,
+        first_name: target.first_name,
+        last_name: target.last_name,
+        club_id: target.club_id,
+        impersonating: true,
+        impersonated_id: target.id,
+        impersonated_role: target.role,
+        impersonated_club_id: target.club_id,
+        real_user_id: req.user.id,
+        real_user_name: `${req.user.first_name} ${req.user.last_name}`,
+      },
+      JWT_SECRET,
+      { expiresIn: '30m' }
+    );
+
+    await auditLog('staff', req.user.id, 'impersonation_started', 'user', target.id,
+      { target_email: target.email, target_role: target.role }, req);
+
+    res.json({
+      token: impersonationToken,
+      user: {
+        id: target.id,
+        email: target.email,
+        role: target.role,
+        first_name: target.first_name,
+        last_name: target.last_name,
+        club_id: target.club_id,
+      },
+      teams,
+    });
+  } catch (err) {
+    console.error('Impersonate error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/impersonate/end — End impersonation session (audit log)
+app.post('/api/super/impersonate/end', authenticate, requireRole('super_admin'), async (req, res) => {
+  try {
+    const { impersonated_user_id } = req.body;
+    await auditLog('staff', req.user.id, 'impersonation_ended', 'user', impersonated_user_id || null,
+      {}, req);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('End impersonate error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/accounts/:id/extend-trial — Extend trial end date
+app.post('/api/super/accounts/:id/extend-trial', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const { days } = req.body;
+    if (!days || days < 1) return res.status(400).json({ error: 'days must be at least 1' });
+
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Subscription not found' });
+    const s = sub.rows[0];
+
+    // Calculate new trial end
+    const currentTrialEnd = s.trial_end ? new Date(s.trial_end) : new Date();
+    const newTrialEnd = new Date(currentTrialEnd);
+    newTrialEnd.setDate(newTrialEnd.getDate() + parseInt(days));
+
+    // Update in Stripe if subscription exists
+    if (stripe && s.stripe_subscription_id) {
+      try {
+        await stripe.subscriptions.update(s.stripe_subscription_id, {
+          trial_end: Math.floor(newTrialEnd.getTime() / 1000),
+        });
+      } catch (stripeErr) {
+        console.error('Stripe trial extension error:', stripeErr.message);
+        return res.status(500).json({ error: `Stripe error: ${stripeErr.message}` });
+      }
+    }
+
+    // Update local record
+    await pool.query(
+      "UPDATE subscriptions SET trial_end = $1, status = 'trialing', updated_at = NOW() WHERE id = $2",
+      [newTrialEnd, s.id]
+    );
+
+    await auditLog('staff', req.user.id, 'trial_extended', 'subscription', s.owner_id,
+      { owner_type: s.owner_type, days, new_trial_end: newTrialEnd.toISOString() }, req);
+
+    res.json({ trial_end: newTrialEnd, message: `Trial extended by ${days} days.` });
+  } catch (err) {
+    console.error('Extend trial error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/accounts/:id/comp — Comp an account (free access)
+app.post('/api/super/accounts/:id/comp', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Subscription not found' });
+    const s = sub.rows[0];
+
+    // Set comped state: mark as active + comped
+    await pool.query(
+      "UPDATE subscriptions SET status = 'active', comped_at = NOW(), comped_by = $1, manually_suspended = false, updated_at = NOW() WHERE id = $2",
+      [req.user.id, s.id]
+    );
+
+    // Ensure the club/team is active
+    if (s.owner_type === 'club') {
+      await pool.query("UPDATE clubs SET status = 'active', subscription_status = 'active' WHERE id = $1", [s.owner_id]);
+    } else {
+      await pool.query("UPDATE teams SET status = 'active' WHERE id = $1", [s.owner_id]);
+    }
+
+    await auditLog('staff', req.user.id, 'account_comped', 'subscription', s.owner_id,
+      { owner_type: s.owner_type }, req);
+
+    res.json({ message: 'Account comped. Full access granted without billing.' });
+  } catch (err) {
+    console.error('Comp account error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/accounts/:id/remove-comp — Remove comp (revert to normal billing status)
+app.post('/api/super/accounts/:id/remove-comp', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Subscription not found' });
+    const s = sub.rows[0];
+
+    // Remove comp. If there's a Stripe subscription, sync status from Stripe; otherwise set to trialing.
+    let newStatus = 'trialing';
+    if (stripe && s.stripe_subscription_id) {
+      try {
+        const stripeSub = await stripe.subscriptions.retrieve(s.stripe_subscription_id);
+        newStatus = mapStripeStatus(stripeSub.status);
+      } catch (err) {
+        // If Stripe sub doesn't exist, default to trialing
+      }
+    }
+
+    await pool.query(
+      "UPDATE subscriptions SET comped_at = NULL, comped_by = NULL, status = $1, updated_at = NOW() WHERE id = $2",
+      [newStatus, s.id]
+    );
+
+    await auditLog('staff', req.user.id, 'comp_removed', 'subscription', s.owner_id,
+      { owner_type: s.owner_type, new_status: newStatus }, req);
+
+    res.json({ message: 'Comp removed.', status: newStatus });
+  } catch (err) {
+    console.error('Remove comp error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/accounts/:id/discount — Apply Stripe coupon/discount
+app.post('/api/super/accounts/:id/discount', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
+  try {
+    const { type, value, duration, duration_in_months } = req.body;
+    if (!type || !value) return res.status(400).json({ error: 'type (percent_off or amount_off) and value are required' });
+    if (!['percent_off', 'amount_off'].includes(type)) return res.status(400).json({ error: 'type must be percent_off or amount_off' });
+
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Subscription not found' });
+    const s = sub.rows[0];
+
+    if (!s.stripe_subscription_id) {
+      return res.status(400).json({ error: 'No Stripe subscription found. Cannot apply discount without a Stripe subscription.' });
+    }
+
+    // Create Stripe coupon
+    const couponParams = {
+      duration: duration || 'once',
+    };
+    if (type === 'percent_off') {
+      couponParams.percent_off = parseFloat(value);
+    } else {
+      couponParams.amount_off = Math.round(parseFloat(value) * 100); // Stripe expects cents
+      couponParams.currency = 'usd';
+    }
+    if (duration === 'repeating' && duration_in_months) {
+      couponParams.duration_in_months = parseInt(duration_in_months);
+    }
+
+    const coupon = await stripe.coupons.create(couponParams);
+
+    // Apply to subscription
+    await stripe.subscriptions.update(s.stripe_subscription_id, {
+      coupon: coupon.id,
+    });
+
+    const discountDesc = type === 'percent_off' ? `${value}% off` : `$${value} off`;
+
+    await auditLog('staff', req.user.id, 'discount_applied', 'subscription', s.owner_id,
+      { owner_type: s.owner_type, discount: discountDesc, coupon_id: coupon.id, duration: duration || 'once' }, req);
+
+    res.json({ message: `Discount applied: ${discountDesc}`, coupon_id: coupon.id });
+  } catch (err) {
+    console.error('Apply discount error:', err);
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
+});
+
+// POST /api/super/accounts/:id/suspend — Manual suspend
+app.post('/api/super/accounts/:id/suspend', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Subscription not found' });
+    const s = sub.rows[0];
+
+    await pool.query(
+      "UPDATE subscriptions SET status = 'suspended', manually_suspended = true, updated_at = NOW() WHERE id = $1",
+      [s.id]
+    );
+
+    // Apply read-only lock to club/team
+    if (s.owner_type === 'club') {
+      await pool.query("UPDATE clubs SET status = 'suspended', subscription_status = 'suspended' WHERE id = $1", [s.owner_id]);
+    } else {
+      await pool.query("UPDATE teams SET status = 'suspended' WHERE id = $1", [s.owner_id]);
+    }
+
+    await auditLog('staff', req.user.id, 'account_suspended', 'subscription', s.owner_id,
+      { owner_type: s.owner_type, reason: req.body.reason || 'manual' }, req);
+
+    res.json({ message: 'Account suspended. All data preserved, access is read-only.' });
+  } catch (err) {
+    console.error('Suspend error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/super/accounts/:id/reactivate — Reactivate suspended account
+app.post('/api/super/accounts/:id/reactivate', authenticate, rejectImpersonation, requireRole('super_admin'), async (req, res) => {
+  try {
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Subscription not found' });
+    const s = sub.rows[0];
+
+    // Determine what status to restore to
+    let newStatus = 'active';
+    if (s.comped_at) {
+      newStatus = 'active';
+    } else if (stripe && s.stripe_subscription_id) {
+      try {
+        const stripeSub = await stripe.subscriptions.retrieve(s.stripe_subscription_id);
+        newStatus = mapStripeStatus(stripeSub.status);
+      } catch (err) {
+        // Default to active if Stripe lookup fails
+      }
+    }
+
+    await pool.query(
+      "UPDATE subscriptions SET status = $1, manually_suspended = false, updated_at = NOW() WHERE id = $2",
+      [newStatus, s.id]
+    );
+
+    // Unlock club/team
+    if (s.owner_type === 'club') {
+      await pool.query("UPDATE clubs SET status = 'active', subscription_status = $1 WHERE id = $2", [newStatus, s.owner_id]);
+    } else {
+      await pool.query("UPDATE teams SET status = 'active' WHERE id = $1", [s.owner_id]);
+    }
+
+    await auditLog('staff', req.user.id, 'account_reactivated', 'subscription', s.owner_id,
+      { owner_type: s.owner_type, new_status: newStatus }, req);
+
+    res.json({ message: 'Account reactivated. Full access restored.', status: newStatus });
+  } catch (err) {
+    console.error('Reactivate error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -5532,6 +6197,37 @@ async function runBuild5Migrations() {
   console.log('Build 5 migrations complete.');
 }
 
+async function runBuild6Migrations() {
+  // Add comped_at and comped_by columns to subscriptions for comp tracking
+  const compedAtCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'subscriptions' AND column_name = 'comped_at'"
+  );
+  if (compedAtCol.rows.length === 0) {
+    await pool.query('ALTER TABLE subscriptions ADD COLUMN comped_at TIMESTAMPTZ');
+    await pool.query('ALTER TABLE subscriptions ADD COLUMN comped_by UUID');
+    console.log('Added comped_at, comped_by columns to subscriptions.');
+  }
+
+  // Add manually_suspended column to subscriptions to distinguish manual suspend from billing suspend
+  const manSuspCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'subscriptions' AND column_name = 'manually_suspended'"
+  );
+  if (manSuspCol.rows.length === 0) {
+    await pool.query('ALTER TABLE subscriptions ADD COLUMN manually_suspended BOOLEAN DEFAULT false');
+    console.log('Added manually_suspended column to subscriptions.');
+  }
+
+  // Relax audit_log actor_type constraint to include 'super_admin'
+  try {
+    await pool.query("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_actor_type_check");
+    await pool.query("ALTER TABLE audit_log ADD CONSTRAINT audit_log_actor_type_check CHECK (actor_type IN ('staff', 'player', 'parent', 'system', 'super_admin'))");
+  } catch (err) {
+    // Constraint may already be updated or not exist
+  }
+
+  console.log('Build 6 migrations complete.');
+}
+
 async function seedAppSettings() {
   const policyContent = `<h1>Daily Reps privacy policy</h1>
 <p>Effective date: June 20, 2026</p>
@@ -5938,6 +6634,7 @@ async function initDatabase() {
       await runBuild3Migrations();
       await runBuild4Migrations();
       await runBuild5Migrations();
+      await runBuild6Migrations();
       await seedAppSettings();
       return;
     }
@@ -5992,6 +6689,7 @@ async function initDatabase() {
         await runBuild3Migrations();
         await runBuild4Migrations();
         await runBuild5Migrations();
+        await runBuild6Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -6023,6 +6721,7 @@ async function initDatabase() {
     await runBuild3Migrations();
     await runBuild4Migrations();
     await runBuild5Migrations();
+    await runBuild6Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {

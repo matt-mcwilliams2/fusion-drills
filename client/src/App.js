@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Login from './pages/Login';
 import PlayerLogin from './pages/PlayerLogin';
@@ -21,11 +21,31 @@ import ConsentPage from './pages/ConsentPage';
 import ParentPortalRequest from './pages/ParentPortalRequest';
 import ParentPortal from './pages/ParentPortal';
 
+function ImpersonationBanner() {
+  const { impersonating, endImpersonation } = useAuth();
+  const navigate = useNavigate();
+  if (!impersonating) return null;
+
+  const handleExit = async () => {
+    await endImpersonation();
+    navigate('/super');
+  };
+
+  return (
+    <div className="impersonation-banner">
+      <span>Viewing as <strong>{impersonating.name}</strong> (read-only)</span>
+      <button className="btn btn-sm btn-outline" onClick={handleExit} style={{ marginLeft: 12 }}>Exit</button>
+    </div>
+  );
+}
+
 function StaffRoute({ children, roles }) {
-  const { user, loading } = useAuth();
+  const { user, loading, impersonating } = useAuth();
   if (loading) return <div className="loading"><div className="spinner" /></div>;
   if (!user) return <Navigate to="/login" />;
   if (roles && !roles.includes(user.role)) {
+    // During impersonation, allow navigation to the impersonated role's pages
+    if (impersonating) return children;
     if (user.role === 'player') return <Navigate to="/" />;
     if (user.role === 'coach') return <Navigate to="/admin" />;
     if (user.role === 'super_admin') return <Navigate to="/super" />;
@@ -63,29 +83,32 @@ function TeamEntry() {
 
 function AppRoutes() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginRedirect />} />
-      <Route path="/t/:joinCode/*" element={<TeamEntry />}>
-        <Route index element={<PlayerRoute><Today /></PlayerRoute>} />
-        <Route path="leaderboard" element={<PlayerRoute><Leaderboard /></PlayerRoute>} />
-        <Route path="me" element={<PlayerRoute><Me /></PlayerRoute>} />
-      </Route>
-      <Route path="/admin" element={<StaffRoute roles={['coach', 'super_admin', 'club_admin']}><AdminLayout /></StaffRoute>}>
-        <Route index element={<Roster />} />
-        <Route path="drills" element={<Drills />} />
-        <Route path="seasons" element={<Seasons />} />
-        <Route path="leaderboard" element={<AdminLeaderboard />} />
-        <Route path="reports" element={<Reports />} />
-        <Route path="invite" element={<InviteCoach />} />
-      </Route>
-      <Route path="/super" element={<StaffRoute roles={['super_admin']}><SuperAdmin /></StaffRoute>} />
-      <Route path="/club" element={<StaffRoute roles={['club_admin']}><ClubAdmin /></StaffRoute>} />
-      <Route path="/invite/:token" element={<InviteAccept />} />
-      <Route path="/consent/:token" element={<ConsentPage />} />
-      <Route path="/parent-portal" element={<ParentPortalRequest />} />
-      <Route path="/parent-portal/:token" element={<ParentPortal />} />
-      <Route path="*" element={<Navigate to="/login" />} />
-    </Routes>
+    <>
+      <ImpersonationBanner />
+      <Routes>
+        <Route path="/login" element={<LoginRedirect />} />
+        <Route path="/t/:joinCode/*" element={<TeamEntry />}>
+          <Route index element={<PlayerRoute><Today /></PlayerRoute>} />
+          <Route path="leaderboard" element={<PlayerRoute><Leaderboard /></PlayerRoute>} />
+          <Route path="me" element={<PlayerRoute><Me /></PlayerRoute>} />
+        </Route>
+        <Route path="/admin" element={<StaffRoute roles={['coach', 'super_admin', 'club_admin']}><AdminLayout /></StaffRoute>}>
+          <Route index element={<Roster />} />
+          <Route path="drills" element={<Drills />} />
+          <Route path="seasons" element={<Seasons />} />
+          <Route path="leaderboard" element={<AdminLeaderboard />} />
+          <Route path="reports" element={<Reports />} />
+          <Route path="invite" element={<InviteCoach />} />
+        </Route>
+        <Route path="/super" element={<StaffRoute roles={['super_admin']}><SuperAdmin /></StaffRoute>} />
+        <Route path="/club" element={<StaffRoute roles={['club_admin']}><ClubAdmin /></StaffRoute>} />
+        <Route path="/invite/:token" element={<InviteAccept />} />
+        <Route path="/consent/:token" element={<ConsentPage />} />
+        <Route path="/parent-portal" element={<ParentPortalRequest />} />
+        <Route path="/parent-portal/:token" element={<ParentPortal />} />
+        <Route path="*" element={<Navigate to="/login" />} />
+      </Routes>
+    </>
   );
 }
 
