@@ -94,6 +94,9 @@ export default function Login() {
           {loading ? 'Signing in...' : 'Sign In'}
         </button>
       </form>
+      <p style={{ marginTop: 24, fontSize: '0.85rem', color: '#888', textAlign: 'center' }}>
+        Are you a player? Ask your coach for your team's login link.
+      </p>
     </div>
   );
 }
