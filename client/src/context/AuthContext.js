@@ -101,13 +101,25 @@ export function AuthProvider({ children }) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.message || data.error || 'Login failed');
+    if (data.must_change_password) {
+      return data;
+    }
     localStorage.setItem('token', data.token);
     setToken(data.token);
     setUser(data.user);
     if (data.team) {
       setTeamInfo(data.team);
     }
-    return data.user;
+    return data;
+  };
+
+  const completePlayerLogin = (data) => {
+    localStorage.setItem('token', data.token);
+    setToken(data.token);
+    setUser(data.user);
+    if (data.team) {
+      setTeamInfo(data.team);
+    }
   };
 
   const logout = () => {
@@ -196,7 +208,7 @@ export function AuthProvider({ children }) {
   return (
     <AuthContext.Provider value={{
       user, token, loading,
-      loginStaff, loginPlayer, logout,
+      loginStaff, loginPlayer, completePlayerLogin, logout,
       completeMfaLogin,
       apiFetch,
       teams, activeTeamId, activeTeam, setActiveTeam,

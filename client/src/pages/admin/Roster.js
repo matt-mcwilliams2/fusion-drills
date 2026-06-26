@@ -42,7 +42,6 @@ export default function Roster() {
     setSaving(true);
     try {
       const body = { ...form };
-      if (!teamInfo?.has_under_13) delete body.parent_email;
       await apiFetch('/api/admin/players', {
         method: 'POST',
         body: JSON.stringify(body),
@@ -260,12 +259,13 @@ export default function Roster() {
                 <label className="form-label">Password</label>
                 <input className="form-input" type="password" value={form.password} onChange={(e) => setForm({...form, password: e.target.value})} required />
               </div>
-              {teamInfo?.has_under_13 && (
-                <div className="form-group">
-                  <label className="form-label">Parent Email <span style={{ fontWeight: 400, color: '#666' }}>(required for consent)</span></label>
-                  <input className="form-input" type="email" value={form.parent_email} onChange={(e) => setForm({...form, parent_email: e.target.value})} required />
-                </div>
-              )}
+              <div className="form-group">
+                <label className="form-label">Parent Email {teamInfo?.has_under_13
+                  ? <span style={{ fontWeight: 400, color: '#666' }}>(required for consent)</span>
+                  : <span style={{ fontWeight: 400, color: '#666' }}>(optional)</span>}
+                </label>
+                <input className="form-input" type="email" value={form.parent_email} onChange={(e) => setForm({...form, parent_email: e.target.value})} required={teamInfo?.has_under_13} />
+              </div>
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={() => setShowAdd(false)}>Cancel</button>
                 <button type="submit" className="btn btn-orange" disabled={saving}>{saving ? 'Adding...' : 'Add Player'}</button>

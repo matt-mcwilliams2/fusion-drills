@@ -613,6 +613,30 @@ async function sendConsentEmail(player, teamName, parentEmail) {
   await sendEmail(parentEmail, `Daily Reps: Consent required for ${player.first_name}`, emailHtml);
 }
 
+async function sendWelcomeEmail(player, teamName, joinCode, parentEmail, coachName, username, password) {
+  const loginUrl = `${APP_URL}/t/${joinCode}`;
+  const emailHtml = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #222;">
+      <h2 style="color: #1348e5;">Daily Reps &mdash; You've Been Invited</h2>
+      <p>Hello,</p>
+      <p><strong>${coachName}</strong> has invited you to join <strong>${teamName}</strong> as a player on Daily Reps.</p>
+      <p>Here are the login details:</p>
+      <div style="background: #f5f5f5; padding: 16px 20px; border-radius: 8px; margin: 16px 0;">
+        <div style="margin-bottom: 8px;"><strong>Team Code:</strong> ${joinCode}</div>
+        <div style="margin-bottom: 8px;"><strong>Username:</strong> ${username}</div>
+        <div><strong>Password:</strong> ${password}</div>
+      </div>
+      <p style="font-size: 0.9em; color: #666;">You will be asked to choose a new password the first time you log in.</p>
+      <p style="text-align: center; margin: 24px 0;">
+        <a href="${loginUrl}" style="display: inline-block; padding: 14px 28px; background: #1348e5; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+          Accept Invitation
+        </a>
+      </p>
+    </div>
+  `;
+  await sendEmail(parentEmail, `${player.first_name} has been invited to Daily Reps`, emailHtml);
+}
+
 // ============================================================
 // INVITATION TOKENS
 // ============================================================
@@ -1146,6 +1170,26 @@ app.post('/api/auth/player-login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // Force password change on first login
+    if (player.must_change_password) {
+      const changeToken = jwt.sign(
+        { player_id: player.id, team_id: team.id, purpose: 'password_change' },
+        JWT_SECRET,
+        { expiresIn: '30m' }
+      );
+      return res.json({
+        must_change_password: true,
+        change_session: changeToken,
+        team: {
+          id: team.id,
+          name: team.name,
+          join_code: team.join_code,
+          primary_color: team.primary_color,
+          logo_url: team.logo_url,
+        },
+      });
+    }
+
     const tokenPayload = {
       id: player.id,
       role: 'player',
@@ -1170,6 +1214,66 @@ app.post('/api/auth/player-login', async (req, res) => {
     });
   } catch (err) {
     console.error('Player login error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/player-change-password
+app.post('/api/auth/player-change-password', async (req, res) => {
+  try {
+    const { change_session, new_password } = req.body;
+    if (!change_session || !new_password) {
+      return res.status(400).json({ error: 'Session token and new password are required' });
+    }
+    if (new_password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(change_session, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'Session expired. Please log in again.' });
+    }
+    if (decoded.purpose !== 'password_change') {
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+
+    const hash = await bcrypt.hash(new_password, 10);
+    await pool.query(
+      'UPDATE players SET password_hash = $1, must_change_password = false WHERE id = $2',
+      [hash, decoded.player_id]
+    );
+
+    const playerResult = await pool.query('SELECT * FROM players WHERE id = $1', [decoded.player_id]);
+    const player = playerResult.rows[0];
+    const teamResult = await pool.query('SELECT * FROM teams WHERE id = $1', [decoded.team_id]);
+    const team = teamResult.rows[0];
+
+    const tokenPayload = {
+      id: player.id,
+      role: 'player',
+      team_id: team.id,
+      username: player.username,
+      first_name: player.first_name,
+      last_name: player.last_name,
+    };
+
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({
+      token,
+      user: tokenPayload,
+      team: {
+        id: team.id,
+        name: team.name,
+        join_code: team.join_code,
+        primary_color: team.primary_color,
+        logo_url: team.logo_url,
+      },
+    });
+  } catch (err) {
+    console.error('Player change password error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -1915,7 +2019,7 @@ app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin',
     }
 
     // Check if team requires consent
-    const teamResult = await pool.query('SELECT has_under_13, name, club_id FROM teams WHERE id = $1', [req.teamId]);
+    const teamResult = await pool.query('SELECT has_under_13, name, club_id, join_code FROM teams WHERE id = $1', [req.teamId]);
     const requiresConsent = teamResult.rows[0]?.has_under_13 === true;
 
     if (requiresConsent && !parent_email) {
@@ -1936,8 +2040,8 @@ app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin',
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
        RETURNING id, username, first_name, last_name, avatar_color, status, consent_status, parent_email, created_at`,
       [req.teamId, first_name, last_name, username.trim(), passwordHash, playerStatus, consentStatus, parent_email || null]
     );
@@ -1958,6 +2062,24 @@ app.post('/api/admin/players', authenticate, requireRole('coach', 'super_admin',
           { parent_email }, req);
       } catch (emailErr) {
         console.error('Auto consent email error:', emailErr.message);
+      }
+    }
+
+    // Send welcome email with credentials if parent_email present
+    if (parent_email) {
+      try {
+        const coachName = `${req.user.first_name} ${req.user.last_name}`;
+        await sendWelcomeEmail(
+          { first_name },
+          teamResult.rows[0].name,
+          teamResult.rows[0].join_code,
+          parent_email,
+          coachName,
+          username.trim(),
+          password
+        );
+      } catch (emailErr) {
+        console.error('Welcome email error:', emailErr.message);
       }
     }
 
@@ -5094,8 +5216,8 @@ app.post('/api/admin/players/import', authenticate, requireRole('coach', 'super_
       const parentEmail = p.email ? p.email.trim() : null;
 
       const result = await client.query(
-        `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email, must_change_password)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true) RETURNING id`,
         [req.teamId, p.first_name, p.last_name, p.username, passwordHash, playerStatus, consentStatus, parentEmail]
       );
 
@@ -5113,6 +5235,24 @@ app.post('/api/admin/players/import', authenticate, requireRole('coach', 'super_
           team.name,
           parentEmail
         );
+      }
+
+      // Send welcome email with credentials if parent email present
+      if (parentEmail) {
+        try {
+          const coachName = `${req.user.first_name} ${req.user.last_name}`;
+          await sendWelcomeEmail(
+            { first_name: p.first_name },
+            team.name,
+            team.join_code,
+            parentEmail,
+            coachName,
+            p.username,
+            tempPassword
+          );
+        } catch (emailErr) {
+          console.error('Welcome email error:', emailErr.message);
+        }
       }
     }
 
@@ -6344,6 +6484,18 @@ async function runBuild6Migrations() {
   console.log('Build 6 migrations complete.');
 }
 
+async function runBuild7Migrations() {
+  const mustChangePwCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'players' AND column_name = 'must_change_password'"
+  );
+  if (mustChangePwCol.rows.length === 0) {
+    await pool.query('ALTER TABLE players ADD COLUMN must_change_password BOOLEAN DEFAULT false');
+    console.log('Added must_change_password column to players.');
+  }
+
+  console.log('Build 7 migrations complete.');
+}
+
 async function seedAppSettings() {
   const policyContent = `<h1>Daily Reps privacy policy</h1>
 <p>Effective date: June 20, 2026</p>
@@ -6751,6 +6903,7 @@ async function initDatabase() {
       await runBuild4Migrations();
       await runBuild5Migrations();
       await runBuild6Migrations();
+      await runBuild7Migrations();
       await seedAppSettings();
       return;
     }
@@ -6806,6 +6959,7 @@ async function initDatabase() {
         await runBuild4Migrations();
         await runBuild5Migrations();
         await runBuild6Migrations();
+        await runBuild7Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -6838,6 +6992,7 @@ async function initDatabase() {
     await runBuild4Migrations();
     await runBuild5Migrations();
     await runBuild6Migrations();
+    await runBuild7Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {

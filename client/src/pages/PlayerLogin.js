@@ -7,7 +7,7 @@ const API_BASE = process.env.REACT_APP_API_URL || '';
 
 export default function PlayerLogin() {
   const { joinCode } = useParams();
-  const { loginPlayer } = useAuth();
+  const { loginPlayer, completePlayerLogin } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -16,6 +16,13 @@ export default function PlayerLogin() {
   const [teamName, setTeamName] = useState('');
   const [teamColor, setTeamColor] = useState('#f77c00');
   const [teamNotFound, setTeamNotFound] = useState(false);
+
+  // Password change state
+  const [changeSession, setChangeSession] = useState(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changeError, setChangeError] = useState('');
+  const [changeSaving, setChangeSaving] = useState(false);
 
   useEffect(() => {
     if (joinCode) {
@@ -40,7 +47,10 @@ export default function PlayerLogin() {
     setError('');
     setLoading(true);
     try {
-      await loginPlayer(username, password, joinCode);
+      const result = await loginPlayer(username, password, joinCode);
+      if (result.must_change_password) {
+        setChangeSession(result.change_session);
+      }
     } catch (err) {
       if (err.message && err.message.toLowerCase().includes('parent') && err.message.toLowerCase().includes('consent')) {
         setError('consent_blocked');
@@ -50,6 +60,34 @@ export default function PlayerLogin() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setChangeError('');
+    if (newPassword.length < 6) {
+      setChangeError('Password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setChangeError('Passwords do not match.');
+      return;
+    }
+    setChangeSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/player-change-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ change_session: changeSession, new_password: newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to change password');
+      completePlayerLogin(data);
+    } catch (err) {
+      setChangeError(err.message);
+    } finally {
+      setChangeSaving(false);
     }
   };
 
@@ -63,6 +101,48 @@ export default function PlayerLogin() {
         <div className="login-error" style={{ fontSize: '1rem', marginTop: 20 }}>
           Team not found. Check your join code and try again.
         </div>
+      </div>
+    );
+  }
+
+  // Password change screen
+  if (changeSession) {
+    return (
+      <div className="login-page">
+        <img src={LOGO} alt="Daily Reps" className="login-logo" />
+        <h1 className="login-title">
+          <span style={{ color: teamColor }}>Daily Reps</span> Training
+        </h1>
+        {teamName && (
+          <div style={{ color: teamColor, fontWeight: 700, fontSize: '1.1rem', marginBottom: 16, textAlign: 'center' }}>
+            {teamName}
+          </div>
+        )}
+        <div style={{ textAlign: 'center', marginBottom: 16, fontSize: '0.95rem', color: '#666' }}>
+          Please choose a new password to continue.
+        </div>
+        <form className="login-form" onSubmit={handleChangePassword}>
+          {changeError && <div className="login-error">{changeError}</div>}
+          <input
+            type="password"
+            placeholder="New Password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            required
+            minLength={6}
+          />
+          <input
+            type="password"
+            placeholder="Confirm Password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            required
+            minLength={6}
+          />
+          <button className="btn btn-orange" type="submit" disabled={changeSaving} style={{ background: teamColor }}>
+            {changeSaving ? 'Saving...' : 'Set Password'}
+          </button>
+        </form>
       </div>
     );
   }
