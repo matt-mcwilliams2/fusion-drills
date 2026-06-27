@@ -423,7 +423,7 @@ export default function Roster() {
 
       {showInvite && teamInfo && (
         <div className="modal-overlay" onClick={() => setShowInvite(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ color: '#000000' }}>
             <h2>Invite Players</h2>
             <p style={{ fontSize: '0.9em', color: '#666', marginBottom: 16 }}>
               Share this link with players so they can create their own accounts and join <strong>{teamInfo.name}</strong>.
