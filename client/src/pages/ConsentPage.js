@@ -95,7 +95,7 @@ export default function ConsentPage() {
   }
 
   return (
-    <div style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 700, margin: '0 auto', padding: 20 }}>
+    <div style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 700, margin: '0 auto', padding: 20, color: '#000000' }}>
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
         <img src={LOGO} alt="Daily Reps" style={{ width: 60, height: 60 }} />
         <h1 style={{ color: '#1348e5', marginBottom: 4 }}>Parental Consent</h1>

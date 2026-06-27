@@ -6636,6 +6636,22 @@ async function runBuild7Migrations() {
     console.log('Added must_change_password column to players.');
   }
 
+  // Ensure consent_records has the columns needed by the grant endpoint
+  // (databases created via Build 2 migration have the old schema)
+  const consentTeamCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'consent_records' AND column_name = 'team_id'"
+  );
+  if (consentTeamCol.rows.length === 0) {
+    await pool.query('ALTER TABLE consent_records ADD COLUMN team_id UUID REFERENCES teams(id)');
+    await pool.query('ALTER TABLE consent_records ADD COLUMN club_id UUID REFERENCES clubs(id)');
+    await pool.query('ALTER TABLE consent_records ADD COLUMN consent_source VARCHAR(30)');
+    await pool.query('ALTER TABLE consent_records ADD COLUMN consent_language TEXT');
+    await pool.query("ALTER TABLE consent_records ADD COLUMN status VARCHAR(20) DEFAULT 'granted'");
+    await pool.query('ALTER TABLE consent_records ADD COLUMN granted_at TIMESTAMPTZ DEFAULT NOW()');
+    await pool.query('ALTER TABLE consent_records ADD COLUMN revoked_at TIMESTAMPTZ');
+    console.log('Added missing columns to consent_records.');
+  }
+
   console.log('Build 7 migrations complete.');
 }
 
