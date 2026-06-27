@@ -1384,6 +1384,149 @@ app.get('/api/teams/by-code/:joinCode', async (req, res) => {
 });
 
 // ============================================================
+// PLAYER SELF-REGISTRATION
+// ============================================================
+
+const registrationAttempts = new Map();
+function checkRegistrationRateLimit(req) {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxAttempts = 10;
+  const attempts = registrationAttempts.get(ip) || [];
+  const recent = attempts.filter(t => t > now - windowMs);
+  if (recent.length >= maxAttempts) return false;
+  recent.push(now);
+  registrationAttempts.set(ip, recent);
+  return true;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, attempts] of registrationAttempts) {
+    const recent = attempts.filter(t => t > now - 15 * 60 * 1000);
+    if (recent.length === 0) registrationAttempts.delete(ip);
+    else registrationAttempts.set(ip, recent);
+  }
+}, 30 * 60 * 1000);
+
+app.post('/api/teams/:joinCode/register', async (req, res) => {
+  try {
+    if (!checkRegistrationRateLimit(req)) {
+      return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+    }
+
+    const { first_name, last_name, email, password, is_under_13 } = req.body;
+    if (!first_name || !last_name) {
+      return res.status(400).json({ error: 'First name and last name are required.' });
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'A valid email address is required.' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    }
+
+    // Resolve team from join code
+    const teamResult = await pool.query(
+      "SELECT * FROM teams WHERE join_code = $1 AND status = 'active'",
+      [req.params.joinCode.toUpperCase().trim()]
+    );
+    if (teamResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Team not found.' });
+    }
+    const team = teamResult.rows[0];
+
+    // Check subscription status
+    const ownerType = team.club_id ? 'club' : 'team';
+    const ownerId = team.club_id || team.id;
+    const sub = await getSubscription(ownerType, ownerId);
+    if (sub && (sub.status === 'suspended' || sub.status === 'canceled')) {
+      return res.status(403).json({ error: 'This team is not currently accepting registrations.' });
+    }
+
+    // Player cap enforcement
+    const capCheck = await checkPlayerCap(ownerType, ownerId, 1);
+    if (!capCheck.allowed) {
+      return res.status(403).json({ error: 'This team has reached its player limit. Please contact your coach.' });
+    }
+
+    // Generate username
+    const existingResult = await pool.query('SELECT username FROM players WHERE team_id = $1', [team.id]);
+    const usernameSet = new Set(existingResult.rows.map(p => p.username));
+    const username = generateUsername(first_name.trim(), last_name.trim(), usernameSet);
+
+    // Create player
+    const passwordHash = await bcrypt.hash(password, 10);
+    const playerStatus = is_under_13 ? 'pending' : 'active';
+    const consentStatus = is_under_13 ? 'awaiting' : 'not_required';
+    const trimmedEmail = email.trim();
+
+    const result = await pool.query(
+      `INSERT INTO players (team_id, first_name, last_name, username, password_hash, status, consent_status, parent_email, player_email, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
+       RETURNING id, username, first_name, last_name, status, consent_status`,
+      [team.id, first_name.trim(), last_name.trim(), username, passwordHash, playerStatus, consentStatus,
+       trimmedEmail, is_under_13 ? null : trimmedEmail]
+    );
+    const newPlayer = result.rows[0];
+
+    await auditLog('player', newPlayer.id, 'player_self_registered', 'player', newPlayer.id,
+      { is_under_13, join_code: req.params.joinCode }, req);
+
+    // Under-12: send consent email, return pending
+    if (is_under_13) {
+      try {
+        await sendConsentEmail(
+          { id: newPlayer.id, first_name: first_name.trim(), last_name: last_name.trim() },
+          team.name,
+          trimmedEmail
+        );
+        await auditLog('system', null, 'consent_email_sent', 'player', newPlayer.id,
+          { parent_email: trimmedEmail }, req);
+      } catch (emailErr) {
+        console.error('Registration consent email error:', emailErr.message);
+      }
+      return res.status(201).json({
+        registered: true,
+        consent_required: true,
+        username: newPlayer.username,
+        message: 'Account created! A consent email has been sent to your parent. You can log in after they approve.',
+      });
+    }
+
+    // 13+: auto-login
+    const tokenPayload = {
+      id: newPlayer.id,
+      role: 'player',
+      team_id: team.id,
+      username: newPlayer.username,
+      first_name: first_name.trim(),
+      last_name: last_name.trim(),
+    };
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+    res.status(201).json({
+      registered: true,
+      consent_required: false,
+      token,
+      user: tokenPayload,
+      team: {
+        id: team.id,
+        name: team.name,
+        join_code: team.join_code,
+        primary_color: team.primary_color,
+        logo_url: team.logo_url,
+      },
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'A player with this username already exists. Please try again.' });
+    }
+    console.error('Player registration error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
 // DRILL ENDPOINTS (Player)
 // ============================================================
 

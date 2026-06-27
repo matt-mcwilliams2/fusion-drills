@@ -19,6 +19,8 @@ export default function Roster() {
   const [importCsv, setImportCsv] = useState('');
   const [importPreview, setImportPreview] = useState(null);
   const [importResult, setImportResult] = useState(null);
+  const [showInvite, setShowInvite] = useState(false);
+  const [copyMsg, setCopyMsg] = useState('');
 
   const loadPlayers = async () => {
     try {
@@ -152,6 +154,7 @@ export default function Roster() {
       <div className="flex-between mb-16">
         <h1 className="page-title" style={{ marginBottom: 0 }}>Roster</h1>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-blue btn-sm" onClick={() => { setShowInvite(true); setCopyMsg(''); }}>Invite Players</button>
           <button className="btn btn-outline btn-sm" onClick={() => { setShowImport(true); setImportCsv(''); setImportPreview(null); setImportResult(null); }}>Import Players</button>
           <button className="btn btn-orange btn-sm" onClick={() => setShowAdd(true)}>+ Add Player</button>
         </div>
@@ -413,6 +416,36 @@ export default function Roster() {
             )}
             <div style={{ marginTop: 16, textAlign: 'right' }}>
               <button className="btn btn-outline btn-sm" onClick={() => setShowImport(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showInvite && teamInfo && (
+        <div className="modal-overlay" onClick={() => setShowInvite(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Invite Players</h2>
+            <p style={{ fontSize: '0.9em', color: '#666', marginBottom: 16 }}>
+              Share this link with players so they can create their own accounts and join <strong>{teamInfo.name}</strong>.
+            </p>
+            <div style={{ background: '#f5f5f5', padding: '12px 16px', borderRadius: 8, fontSize: '0.85rem', wordBreak: 'break-all', fontFamily: 'monospace', marginBottom: 12 }}>
+              {`${window.location.origin}/register/${teamInfo.join_code}`}
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button className="btn btn-blue btn-sm" onClick={() => {
+                navigator.clipboard.writeText(`${window.location.origin}/register/${teamInfo.join_code}`);
+                setCopyMsg('Copied!');
+                setTimeout(() => setCopyMsg(''), 2000);
+              }}>
+                Copy Link
+              </button>
+              {copyMsg && <span style={{ color: '#2ecc71', fontSize: '0.85em', fontWeight: 600 }}>{copyMsg}</span>}
+            </div>
+            <p style={{ fontSize: '0.8em', color: '#999', marginTop: 16 }}>
+              Players under 13 will need parental consent before they can log in.
+            </p>
+            <div style={{ marginTop: 16, textAlign: 'right' }}>
+              <button className="btn btn-outline btn-sm" onClick={() => setShowInvite(false)}>Close</button>
             </div>
           </div>
         </div>

@@ -20,6 +20,7 @@ import InviteAccept from './pages/InviteAccept';
 import ConsentPage from './pages/ConsentPage';
 import ParentPortalRequest from './pages/ParentPortalRequest';
 import ParentPortal from './pages/ParentPortal';
+import PlayerRegister from './pages/PlayerRegister';
 
 function ImpersonationBanner() {
   const { impersonating, endImpersonation } = useAuth();
@@ -104,6 +105,7 @@ function AppRoutes() {
         <Route path="/club" element={<StaffRoute roles={['club_admin']}><ClubAdmin /></StaffRoute>} />
         <Route path="/invite/:token" element={<InviteAccept />} />
         <Route path="/consent/:token" element={<ConsentPage />} />
+        <Route path="/register/:joinCode" element={<PlayerRegister />} />
         <Route path="/parent-portal" element={<ParentPortalRequest />} />
         <Route path="/parent-portal/:token" element={<ParentPortal />} />
         <Route path="*" element={<Navigate to="/login" />} />
