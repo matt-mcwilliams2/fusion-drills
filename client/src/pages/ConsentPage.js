@@ -135,7 +135,7 @@ export default function ConsentPage() {
               onChange={(e) => setAgreed(e.target.checked)}
               style={{ marginTop: 3, width: 18, height: 18 }}
             />
-            <span>
+            <span style={{ color: '#ffffff' }}>
               I agree and give permission for my child to use Daily Reps. I have read the consent notice above and the Privacy Policy.
             </span>
           </label>
