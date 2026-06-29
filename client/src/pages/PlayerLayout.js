@@ -34,6 +34,9 @@ export default function PlayerLayout() {
         <button className="header-logout" onClick={logout}>Log out</button>
       </header>
       <Outlet />
+      <div style={{ textAlign: 'center', fontSize: 14, color: '#fff', padding: '8px 0' }}>
+        Need support? Email Matt at <a href="mailto:matt@mattmcwilliams.com" style={{ color: '#fff' }}>matt@mattmcwilliams.com</a>
+      </div>
       <nav className="bottom-nav">
         <NavLink to={basePath} end className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="nav-icon">{'\u26BD'}</span>
