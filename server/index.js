@@ -6059,7 +6059,16 @@ app.post('/api/billing/webhook', async (req, res) => {
 // SPA CATCH-ALL
 // ============================================================
 
+const indexHtml = fs.readFileSync(path.join(__dirname, '../client/build', 'index.html'), 'utf8');
+
 app.get('*', (req, res) => {
+  // For player routes, serve index.html with team-scoped manifest
+  const match = req.path.match(/^\/t\/([A-Za-z0-9]+)/);
+  if (match) {
+    const joinCode = match[1].toUpperCase();
+    const modified = indexHtml.replace('/manifest.json', `/t/${joinCode}/manifest.json`);
+    return res.type('html').send(modified);
+  }
   res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
 });
 
