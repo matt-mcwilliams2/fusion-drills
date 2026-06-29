@@ -1720,6 +1720,56 @@ app.post('/api/drills/:id/complete', authenticate, requireRole('player'), async 
   }
 });
 
+// PUT /api/drills/:id/claim-bonus
+app.put('/api/drills/:id/claim-bonus', authenticate, requireRole('player'), async (req, res) => {
+  try {
+    const drillId = req.params.id;
+
+    // Verify drill exists and belongs to player's team
+    const drillCheck = await pool.query(
+      'SELECT * FROM drills WHERE id = $1 AND team_id = $2',
+      [drillId, req.teamId]
+    );
+    if (drillCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Drill not found' });
+    }
+
+    const drill = drillCheck.rows[0];
+    const drillDate = drill.date.toISOString().split('T')[0];
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+    if (drillDate !== todayStr && drillDate !== yesterdayStr) {
+      return res.status(403).json({ error: 'You can only claim bonus points for today or yesterday' });
+    }
+
+    // Update did_extra on the existing completion
+    const result = await pool.query(
+      'UPDATE completions SET did_extra = true WHERE player_id = $1 AND drill_id = $2 AND did_extra = false RETURNING *',
+      [req.user.id, drillId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Bonus already claimed or drill not completed' });
+    }
+
+    // Recalculate stats
+    try {
+      await updatePlayerStats(req.user.id, req.teamId);
+    } catch (statErr) {
+      console.error('Stats update error (non-fatal):', statErr);
+    }
+
+    res.json({ completion: result.rows[0] });
+  } catch (err) {
+    console.error('Claim bonus error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============================================================
 // PLAYER QUESTION ENDPOINTS
 // ============================================================

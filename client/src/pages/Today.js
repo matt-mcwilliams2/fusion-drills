@@ -344,6 +344,27 @@ export default function Today() {
             {streak && isToday && <div className="completion-streak">{'\uD83D\uDD25'} {streak} day streak</div>}
             {completion.did_extra && <div className="completion-extra">{'\u2B50'} Extra time logged</div>}
           </div>
+          {!completion.did_extra && canComplete && (
+            <div style={{ textAlign: 'center', marginTop: 16, padding: '0 16px' }}>
+              <p style={{ fontSize: '0.85rem', color: '#ccc', marginBottom: 10 }}>
+                If you did your bonus work but failed to claim your bonus points, click below. (Only if you did the bonus work!).
+              </p>
+              <button
+                className="btn btn-outline btn-sm"
+                disabled={completing}
+                onClick={async () => {
+                  setCompleting(true);
+                  try {
+                    const data = await apiFetch(`/api/drills/${drill.id}/claim-bonus`, { method: 'PUT' });
+                    setCompletion(data.completion);
+                  } catch (err) { alert(err.message); }
+                  finally { setCompleting(false); }
+                }}
+              >
+                {completing ? 'Claiming...' : 'I Did the Bonus Work!'}
+              </button>
+            </div>
+          )}
         </div>
       );
     }
