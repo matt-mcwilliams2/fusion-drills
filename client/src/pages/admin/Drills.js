@@ -16,7 +16,7 @@ export default function Drills() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '20', points_extra: '5', is_challenge: false });
+  const [form, setForm] = useState({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '20', points_extra: '5', bonus_criteria: '', is_challenge: false });
   const [hasQuestions, setHasQuestions] = useState(false);
   const [questions, setQuestions] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -34,7 +34,7 @@ export default function Drills() {
 
   const openAdd = () => {
     setEditing(null);
-    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '20', points_extra: '5', is_challenge: false });
+    setForm({ date: '', title: '', description: '', youtube_url: '', target_time: '', points_completion: '20', points_extra: '5', bonus_criteria: '', is_challenge: false });
     setHasQuestions(false);
     setQuestions([]);
     setShowModal(true);
@@ -42,7 +42,7 @@ export default function Drills() {
 
   const openEdit = async (drill) => {
     setEditing(drill);
-    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '', target_time: drill.target_time || '', points_completion: drill.points_completion != null ? drill.points_completion : '10', points_extra: drill.points_extra != null ? drill.points_extra : '5', is_challenge: drill.is_challenge || false });
+    setForm({ date: (drill.date || '').split('T')[0], title: drill.title, description: drill.description || '', youtube_url: drill.youtube_url || '', target_time: drill.target_time || '', points_completion: drill.points_completion != null ? drill.points_completion : '10', points_extra: drill.points_extra != null ? drill.points_extra : '5', bonus_criteria: drill.bonus_criteria || '', is_challenge: drill.is_challenge || false });
     // Load existing questions
     try {
       const data = await apiFetch(`/api/admin/drills/${drill.id}/questions`);
@@ -249,9 +249,13 @@ export default function Drills() {
                   )}
                 </div>
                 <div className="form-group form-group-half">
-                  <label className="form-label">Points: Extra 15 min</label>
+                  <label className="form-label">Bonus Points Available</label>
                   <input className="form-input" type="number" min="0" value={form.points_extra} onChange={(e) => setForm({...form, points_extra: e.target.value})} />
                 </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Bonus Points Criteria</label>
+                <input className="form-input" value={form.bonus_criteria} onChange={(e) => setForm({...form, bonus_criteria: e.target.value})} placeholder="e.g. I did 15+ extra minutes of training" />
               </div>
 
               {showPointGuide && (
@@ -264,7 +268,7 @@ export default function Drills() {
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>Recommended ranges:</div>
                   <ul style={{ margin: '0 0 0 16px', padding: 0, lineHeight: 1.6 }}>
                     <li>Completion points: 15-25 per drill (default 20)</li>
-                    <li>Extra 15 min bonus: 5-10 (default 5)</li>
+                    <li>Bonus points: 5-10 (default 5)</li>
                     <li>Question points: 2-5 each</li>
                     <li>Challenge day: up to 2x normal completion, used occasionally</li>
                   </ul>

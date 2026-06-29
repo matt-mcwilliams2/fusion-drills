@@ -108,6 +108,7 @@ CREATE TABLE drills (
     target_time INTEGER,
     completion_points INTEGER DEFAULT 10,
     extra_points INTEGER DEFAULT 5,
+    bonus_criteria TEXT,
     is_challenge_day BOOLEAN DEFAULT false,
     created_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ DEFAULT NOW(),

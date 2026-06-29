@@ -374,7 +374,7 @@ export default function Today() {
                 checked={didExtra}
                 onChange={(e) => setDidExtra(e.target.checked)}
               />
-              <span className="extra-check-label">I did 15+ extra minutes</span>
+              <span className="extra-check-label">{drill.bonus_criteria ? `BONUS POINTS: ${drill.bonus_criteria}` : 'I did 15+ extra minutes'}</span>
             </label>
             <div className="mt-12" style={{ textAlign: 'center' }}>
               <button

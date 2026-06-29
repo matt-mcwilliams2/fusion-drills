@@ -1565,6 +1565,7 @@ app.get('/api/drills/today', authenticate, requireRole('player'), async (req, re
       is_challenge: row.is_challenge_day,
       completion_points: row.completion_points,
       extra_points: row.extra_points,
+      bonus_criteria: row.bonus_criteria,
       created_at: row.created_at,
       has_questions: parseInt(qCount.rows[0].cnt, 10) > 0,
     };
@@ -1620,6 +1621,7 @@ app.get('/api/drills/date/:date', authenticate, requireRole('player'), async (re
       is_challenge: row.is_challenge_day,
       completion_points: row.completion_points,
       extra_points: row.extra_points,
+      bonus_criteria: row.bonus_criteria,
       created_at: row.created_at,
       has_questions: parseInt(qCount.rows[0].cnt, 10) > 0,
     };
@@ -2326,7 +2328,7 @@ app.get('/api/admin/drills', authenticate, requireRole('coach', 'super_admin', '
 
 app.post('/api/admin/drills', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, requireActiveSubscription, async (req, res) => {
   try {
-    const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge } = req.body;
+    const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge, bonus_criteria } = req.body;
     if (!date || !title) {
       return res.status(400).json({ error: 'Date and title are required' });
     }
@@ -2336,13 +2338,14 @@ app.post('/api/admin/drills', authenticate, requireRole('coach', 'super_admin'),
     const seasonId = season ? season.id : null;
 
     const result = await pool.query(
-      `INSERT INTO drills (team_id, season_id, date, title, description, youtube_url, target_time, completion_points, extra_points, is_challenge_day, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO drills (team_id, season_id, date, title, description, youtube_url, target_time, completion_points, extra_points, bonus_criteria, is_challenge_day, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [req.teamId, seasonId, date, title, description || null, youtube_url || null,
        target_time ? parseInt(target_time, 10) : null,
        points_completion ? parseInt(points_completion, 10) : 10,
        points_extra ? parseInt(points_extra, 10) : 5,
+       bonus_criteria || null,
        is_challenge || false, req.user.id]
     );
 
@@ -2364,7 +2367,7 @@ app.post('/api/admin/drills', authenticate, requireRole('coach', 'super_admin'),
 
 app.put('/api/admin/drills/:id', authenticate, requireRole('coach', 'super_admin'), requireTeamAccess, async (req, res) => {
   try {
-    const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge } = req.body;
+    const { date, title, description, youtube_url, target_time, points_completion, points_extra, is_challenge, bonus_criteria } = req.body;
 
     const result = await pool.query(
       `UPDATE drills
@@ -2375,13 +2378,15 @@ app.put('/api/admin/drills/:id', authenticate, requireRole('coach', 'super_admin
            target_time = $5,
            completion_points = COALESCE($6, 10),
            extra_points = COALESCE($7, 5),
-           is_challenge_day = $8
-       WHERE id = $9 AND team_id = $10
+           bonus_criteria = $8,
+           is_challenge_day = $9
+       WHERE id = $10 AND team_id = $11
        RETURNING *`,
       [date || null, title || null, description || null, youtube_url || null,
        target_time ? parseInt(target_time, 10) : null,
        points_completion ? parseInt(points_completion, 10) : null,
        points_extra ? parseInt(points_extra, 10) : null,
+       bonus_criteria || null,
        is_challenge || false, req.params.id, req.teamId]
     );
 
@@ -6664,6 +6669,18 @@ async function runBuild7Migrations() {
   console.log('Build 7 migrations complete.');
 }
 
+async function runBuild8Migrations() {
+  const bonusCriteriaCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'drills' AND column_name = 'bonus_criteria'"
+  );
+  if (bonusCriteriaCol.rows.length === 0) {
+    await pool.query('ALTER TABLE drills ADD COLUMN bonus_criteria TEXT');
+    console.log('Added bonus_criteria column to drills.');
+  }
+
+  console.log('Build 8 migrations complete.');
+}
+
 async function seedAppSettings() {
   const policyContent = `<h1>Daily Reps privacy policy</h1>
 <p>Effective date: June 20, 2026</p>
@@ -7072,6 +7089,7 @@ async function initDatabase() {
       await runBuild5Migrations();
       await runBuild6Migrations();
       await runBuild7Migrations();
+      await runBuild8Migrations();
       await seedAppSettings();
       return;
     }
@@ -7128,6 +7146,7 @@ async function initDatabase() {
         await runBuild5Migrations();
         await runBuild6Migrations();
         await runBuild7Migrations();
+        await runBuild8Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -7161,6 +7180,7 @@ async function initDatabase() {
     await runBuild5Migrations();
     await runBuild6Migrations();
     await runBuild7Migrations();
+    await runBuild8Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {
