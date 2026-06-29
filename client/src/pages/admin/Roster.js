@@ -155,6 +155,24 @@ export default function Roster() {
         <h1 className="page-title" style={{ marginBottom: 0 }}>Roster</h1>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-blue btn-sm" onClick={() => { setShowInvite(true); setCopyMsg(''); }}>Invite Players</button>
+          <button className="btn btn-outline btn-sm" onClick={() => {
+            const csvHeader = 'First Name,Last Name,Email,Status,Date and Time Signed Up';
+            const csvRows = players.map(p => {
+              const email = p.player_email || p.parent_email || '';
+              let status = 'Active';
+              if (p.consent_status === 'awaiting') status = 'Awaiting Consent';
+              else if (p.status === 'inactive') status = 'Inactive';
+              const signedUp = p.created_at ? new Date(p.created_at).toLocaleString() : '';
+              return [p.first_name, p.last_name, email, status, signedUp]
+                .map(v => `"${String(v).replace(/"/g, '""')}"`)
+                .join(',');
+            });
+            const csv = [csvHeader, ...csvRows].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = 'roster-export.csv'; a.click();
+            URL.revokeObjectURL(url);
+          }}>Export Roster</button>
           <button className="btn btn-outline btn-sm" onClick={() => { setShowImport(true); setImportCsv(''); setImportPreview(null); setImportResult(null); }}>Import Players</button>
           <button className="btn btn-orange btn-sm" onClick={() => setShowAdd(true)}>+ Add Player</button>
         </div>

@@ -2113,7 +2113,7 @@ app.get('/api/me/badges', authenticate, requireRole('player'), async (req, res) 
 app.get('/api/admin/players', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, username, first_name, last_name, avatar_color, status, consent_status, parent_email, created_at FROM players WHERE team_id = $1 ORDER BY last_name ASC",
+      "SELECT id, username, first_name, last_name, avatar_color, status, consent_status, player_email, parent_email, created_at FROM players WHERE team_id = $1 ORDER BY last_name ASC",
       [req.teamId]
     );
 
