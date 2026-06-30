@@ -102,6 +102,19 @@ export default function Roster() {
     } catch (err) { alert(err.message); }
   };
 
+  const handleDailyEmailToggle = async () => {
+    const newVal = !teamInfo?.daily_email_enabled;
+    try {
+      await apiFetch(`/api/admin/teams/${teamInfo.id}/daily-email`, {
+        method: 'PUT',
+        body: JSON.stringify({ daily_email_enabled: newVal }),
+      });
+      setActionMsg(newVal ? 'Daily lesson emails enabled.' : 'Daily lesson emails disabled.');
+      loadTeamInfo();
+      setTimeout(() => setActionMsg(''), 5000);
+    } catch (err) { alert(err.message); }
+  };
+
   const handleSendConsent = async (player) => {
     if (!player.parent_email) {
       const email = window.prompt(`Enter parent email for ${player.first_name} ${player.last_name}:`);
@@ -188,6 +201,22 @@ export default function Roster() {
           />
           <span style={{ fontSize: '0.8em', color: '#666' }}>
             {teamInfo.has_under_13 ? 'Players need parental consent to log in' : 'Check this box if you have players under age 13.'}
+          </span>
+        </div>
+      )}
+
+      {teamInfo && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, padding: '10px 14px', background: '#f5f5f5', borderRadius: 8, justifyContent: 'flex-start' }}>
+          <input
+            type="checkbox"
+            checked={!!teamInfo.daily_email_enabled}
+            onChange={handleDailyEmailToggle}
+            style={{ width: 18, height: 18, cursor: 'pointer' }}
+          />
+          <span style={{ fontSize: '0.8em', color: '#666' }}>
+            {teamInfo.daily_email_enabled
+              ? 'Daily lesson emails are being sent to players at 8 AM ET'
+              : 'Send a daily email to players when a lesson is scheduled'}
           </span>
         </div>
       )}

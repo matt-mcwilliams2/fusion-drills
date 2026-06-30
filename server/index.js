@@ -3111,11 +3111,40 @@ app.put('/api/admin/teams/:id/under-13', authenticate, requireRole('coach', 'sup
 // GET /api/admin/teams/current - Get current team info including has_under_13
 app.get('/api/admin/teams/current', authenticate, requireRole('coach', 'super_admin', 'club_admin'), requireTeamAccess, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, name, has_under_13, join_code, primary_color, logo_url FROM teams WHERE id = $1', [req.teamId]);
+    const result = await pool.query('SELECT id, name, has_under_13, join_code, primary_color, logo_url, daily_email_enabled FROM teams WHERE id = $1', [req.teamId]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Team not found' });
     res.json({ team: result.rows[0] });
   } catch (err) {
     console.error('Get team error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/admin/teams/:id/daily-email - Toggle daily lesson emails
+app.put('/api/admin/teams/:id/daily-email', authenticate, requireRole('coach', 'super_admin', 'club_admin'), async (req, res) => {
+  try {
+    const { daily_email_enabled } = req.body;
+    if (typeof daily_email_enabled !== 'boolean') {
+      return res.status(400).json({ error: 'daily_email_enabled must be a boolean' });
+    }
+
+    const teamId = req.params.id;
+
+    // Verify team access
+    if (req.role === 'coach') {
+      const check = await pool.query('SELECT 1 FROM coach_teams WHERE user_id = $1 AND team_id = $2', [req.user.id, teamId]);
+      if (check.rows.length === 0) return res.status(403).json({ error: 'No access to this team' });
+    } else if (req.role === 'club_admin') {
+      const check = await pool.query('SELECT 1 FROM teams WHERE id = $1 AND club_id = $2', [teamId, req.user.club_id]);
+      if (check.rows.length === 0) return res.status(403).json({ error: 'Team not in your club' });
+    }
+
+    await pool.query('UPDATE teams SET daily_email_enabled = $1 WHERE id = $2', [daily_email_enabled, teamId]);
+    await auditLog('staff', req.user.id, 'team_daily_email_toggled', 'team', teamId, { daily_email_enabled }, req);
+
+    res.json({ message: 'Team updated', daily_email_enabled });
+  } catch (err) {
+    console.error('Update daily email setting error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -6731,6 +6760,18 @@ async function runBuild8Migrations() {
   console.log('Build 8 migrations complete.');
 }
 
+async function runBuild9Migrations() {
+  const dailyEmailCol = await pool.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'teams' AND column_name = 'daily_email_enabled'"
+  );
+  if (dailyEmailCol.rows.length === 0) {
+    await pool.query('ALTER TABLE teams ADD COLUMN daily_email_enabled BOOLEAN DEFAULT false');
+    console.log('Added daily_email_enabled column to teams.');
+  }
+
+  console.log('Build 9 migrations complete.');
+}
+
 async function seedAppSettings() {
   const policyContent = `<h1>Daily Reps privacy policy</h1>
 <p>Effective date: June 20, 2026</p>
@@ -7140,6 +7181,7 @@ async function initDatabase() {
       await runBuild6Migrations();
       await runBuild7Migrations();
       await runBuild8Migrations();
+      await runBuild9Migrations();
       await seedAppSettings();
       return;
     }
@@ -7197,6 +7239,7 @@ async function initDatabase() {
         await runBuild6Migrations();
         await runBuild7Migrations();
         await runBuild8Migrations();
+        await runBuild9Migrations();
         await seedAppSettings();
 
         // Migrate data
@@ -7231,6 +7274,7 @@ async function initDatabase() {
     await runBuild6Migrations();
     await runBuild7Migrations();
     await runBuild8Migrations();
+    await runBuild9Migrations();
     await seedAppSettings();
     console.log('Database initialization complete.');
   } catch (err) {
@@ -7299,6 +7343,77 @@ async function runRetentionJob() {
   }
 }
 
+// ============================================================
+// DAILY LESSON EMAIL
+// ============================================================
+
+function buildDailyLessonEmailHtml(firstName, title, description) {
+  return `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #222;">
+      <h2 style="color: #1348e5;">Daily Reps</h2>
+      <p>${firstName},</p>
+      <p>Today's Daily Reps lesson is ready for you!</p>
+      <h3 style="margin: 24px 0 8px;">${title}</h3>
+      ${description ? `<p style="color: #444;">${description}</p>` : ''}
+      <p>Login now or open the app to do today's lesson!</p>
+      <p style="margin-top: 24px;">-Matt McWilliams</p>
+    </div>
+  `;
+}
+
+async function runDailyLessonEmails() {
+  console.log('Running daily lesson email job...');
+  try {
+    // Get today's date in Eastern time
+    const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const todayStr = nowET.toISOString().split('T')[0];
+
+    // Find teams with daily emails enabled that have a drill scheduled for today
+    const teamsWithDrills = await pool.query(
+      `SELECT t.id AS team_id, d.title, d.description
+       FROM teams t
+       JOIN drills d ON d.team_id = t.id AND d.date = $1
+       WHERE t.daily_email_enabled = true AND t.status = 'active'`,
+      [todayStr]
+    );
+
+    if (teamsWithDrills.rows.length === 0) {
+      console.log('Daily lesson emails: no teams with drills today.');
+      return;
+    }
+
+    let totalSent = 0;
+
+    for (const row of teamsWithDrills.rows) {
+      const players = await pool.query(
+        `SELECT first_name, player_email, parent_email
+         FROM players
+         WHERE team_id = $1 AND status = 'active'`,
+        [row.team_id]
+      );
+
+      for (const player of players.rows) {
+        const emailAddresses = new Set();
+        if (player.player_email) emailAddresses.add(player.player_email.toLowerCase());
+        if (player.parent_email) emailAddresses.add(player.parent_email.toLowerCase());
+
+        if (emailAddresses.size === 0) continue;
+
+        const htmlBody = buildDailyLessonEmailHtml(player.first_name, row.title, row.description);
+
+        for (const addr of emailAddresses) {
+          await sendEmail(addr, "Today's Lesson is Ready!", htmlBody);
+          totalSent++;
+        }
+      }
+    }
+
+    console.log(`Daily lesson emails: sent ${totalSent} email(s) across ${teamsWithDrills.rows.length} team(s).`);
+  } catch (err) {
+    console.error('Daily lesson email job error:', err);
+  }
+}
+
 // Schedule: daily at 3:00 AM UTC
 cron.schedule('0 3 * * *', runRetentionJob);
 
@@ -7327,6 +7442,9 @@ cron.schedule('0 9 * * *', async () => {
     console.error('Card expiry check error:', err);
   }
 });
+
+// Daily lesson email: every day at 8:00 AM Eastern
+cron.schedule('0 8 * * *', runDailyLessonEmails, { timezone: 'America/New_York' });
 
 // ============================================================
 // START SERVER
